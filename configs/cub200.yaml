@@ -1,0 +1,94 @@
+# -------------------------------------------------------
+# Config: CUB-200-2011 Dataset
+# 200 bird species, CUB annotation format
+# -------------------------------------------------------
+
+dataset:
+  name: cub200
+  format: cub
+  root: D:\Thesis\Test 1st\CUB_200_2011
+  image_extensions: [jpg, jpeg, png]
+  num_classes: 200
+
+model:
+  name: bioclip2
+  pretrained: hf-hub:imageomics/bioclip-2
+  normalize_embeddings: true
+  batch_size: 64
+  num_workers: 8
+
+  # Prompt templates for CUB-200.
+  #
+  # CUB folder names are common names (e.g. "Black_footed_Albatross"),
+  # not binomial scientific names, so {genus} is the first word of the
+  # common name here rather than the true taxonomic genus. This is an
+  # acceptable approximation. If you have the scientific names available,
+  # replace the folder names with them for better alignment.
+  #
+  # Birds belong to class Aves, order varies by species.
+  # Aves is included in every template to anchor the taxonomic context.
+  prompt_templates:
+    - "{name}"
+    - "a photo of {name}"
+    - "a photo of {name}, a bird"
+    - "a bird of the class Aves, {name}"
+    - "a wildlife photograph of {name}, a bird species"
+
+clustering:
+  methods:
+    - name: kmeans
+      n_clusters: 200
+      n_init: 50
+      random_state: 42
+      max_iter: 500
+
+    - name: kmeans_text_guided
+      n_clusters: 200
+      n_init: 1
+      random_state: 42
+      max_iter: 300
+
+    - name: agglomerative
+      n_clusters: 200
+      linkage: ward
+
+    - name: spectral
+      n_clusters: 200
+      n_init: 10
+      random_state: 42
+      n_neighbors: 15
+
+    # Parameters for dbscan live in the dbscan: block below.
+    - name: dbscan
+
+    # Parameters for hdbscan live in the hdbscan: block below.
+    - name: hdbscan
+
+evaluation:
+  top_k_confusions: 20
+
+visualization:
+  method: umap
+  umap:
+    n_neighbors: 30
+    min_dist: 0.1
+    metric: cosine
+    random_state: 42
+  subsample: 5000
+  dpi: 300
+  export_pdf: true
+
+output_dir: results/cub200
+seed: 42
+
+# -------------------------------------------------------
+# Density-based clustering (DBSCAN + HDBSCAN)
+# -------------------------------------------------------
+
+dbscan:
+  pca_components: 100
+  min_samples: 10
+
+hdbscan:
+  pca_components: 100
+  sweep_range: [10, 15, 20, 25, 30, 35, 40, 45]

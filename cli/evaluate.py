@@ -1,0 +1,246 @@
+"""
+cli/evaluate.py
+---------------
+CLI command: evaluate all clustering results and generate all figures.
+
+Usage:
+    python cli/evaluate.py --config configs/eumoth.yaml
+
+Requires:
+    <output_dir>/features.npz
+    <output_dir>/clusters_<method>.npz   for each method
+
+Output:
+    <output_dir>/metrics.json
+    <output_dir>/metrics_summary.csv
+    <output_dir>/figures/*.png
+"""
+
+import argparse
+import sys
+import os
+import json
+import time
+import numpy as np
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from src.utils.io           import (set_seed, load_config, load_features,
+                                    load_clusters, ensure_dir)
+from src.evaluation.metrics import evaluate, metrics_to_json_safe, build_summary_csv
+from src.utils.pretty       import (header, subheader, metrics_table,
+                                    comparison_table, verdict, done, saved)
+from src.visualization.plots import (
+    plot_embedding,
+    plot_confusion_heatmap,
+    plot_top_confusions,
+    plot_cluster_sizes,
+    plot_intra_inter_distances,
+    plot_method_comparison,
+    plot_per_class_accuracy,
+)
+
+
+def _get_2d_projection(features, config, output_dir):
+    """Load cached projection or compute fresh."""
+    cache = os.path.join(output_dir, "features_2d.npy")
+    if os.path.exists(cache):
+        print("    [proj]  Loading cached 2D projection")
+        return np.load(cache)
+
+    vis = config["visualization"]
+    method = vis.get("method", "umap")
+    if method == "umap":
+        try:
+            import umap as umap_lib
+        except ImportError:
+            method = "tsne"
+
+    if method == "umap":
+        cfg = vis["umap"]
+        import umap as umap_lib
+        reducer = umap_lib.UMAP(
+            n_neighbors  = cfg.get("n_neighbors", 30),
+            n_components = 2,
+            min_dist     = cfg.get("min_dist", 0.1),
+            metric       = cfg.get("metric", "cosine"),
+            random_state = cfg.get("random_state", 42),
+        )
+        print("    [proj]  Computing UMAP 2D projection ...")
+        f2d = reducer.fit_transform(features)
+    else:
+        from sklearn.manifold import TSNE
+        cfg = vis.get("tsne", {})
+        reducer = TSNE(n_components=2, perplexity=cfg.get("perplexity", 40),
+                       random_state=cfg.get("random_state", 42),
+                       init="pca", learning_rate="auto")
+        print("    [proj]  Computing t-SNE 2D projection ...")
+        f2d = reducer.fit_transform(features)
+
+    np.save(cache, f2d)
+    saved("features_2d.npy", cache)
+    return f2d
+
+
+def main(config_path: str = None) -> None:
+    if config_path is None:
+        parser = argparse.ArgumentParser(
+            description="Evaluate clustering results and generate figures."
+        )
+        parser.add_argument("--config", required=True)
+        args        = parser.parse_args()
+        config_path = args.config
+
+    config = load_config(config_path)
+    set_seed(config.get("seed", 42))
+
+    output_dir  = config["output_dir"]
+    figures_dir = os.path.join(output_dir, "figures")
+    ensure_dir(figures_dir)
+
+    header("STEP: Evaluation + Figures")
+
+    # Load features
+    fp = os.path.join(output_dir, "features.npz")
+    features, labels, image_paths, class_names = load_features(fp)
+    true_labels = np.array(labels)
+    top_k = config["evaluation"].get("top_k_confusions", 20)
+
+    print("    Images    : " + str(len(true_labels)))
+    print("    Classes   : " + str(len(class_names)))
+
+    # 2D projection (shared across all plots)
+    subheader("2D projection")
+    import warnings
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore",
+            message="n_jobs value.*overridden",
+            category=UserWarning)
+        features_2d = _get_2d_projection(features, config, output_dir)
+
+    # True-label embedding (shared reference figure)
+    subheader("True-label embedding")
+    plot_embedding(
+        features_2d, true_labels,
+        title       = "2D Embedding  --  True Labels  (" + config["dataset"]["name"] + ")",
+        class_names = class_names,
+        config      = config,
+        output_dir  = figures_dir,
+        filename    = "embedding_true_labels.png",
+    )
+
+    # Intra/inter distances (computed once)
+    subheader("Embedding separation quality")
+    plot_intra_inter_distances(
+        features, true_labels, config,
+        output_dir = figures_dir,
+        filename   = "intra_inter_distances.png",
+    )
+
+    # Evaluate each method
+    all_metrics    = {}
+    method_configs = {m["name"]: m for m in config["clustering"]["methods"]}
+    total          = len(method_configs)
+
+    for i, (method_name, method_cfg) in enumerate(method_configs.items(), 1):
+        cluster_path = os.path.join(output_dir, "clusters_" + method_name + ".npz")
+        if not os.path.exists(cluster_path):
+            print("\n    [skip]  " + method_name + " (no cluster file found)")
+            continue
+
+        subheader("Method {}/{}:  {}".format(i, total, method_name.upper()))
+        t0 = time.time()
+
+        cluster_ids, _, _ = load_clusters(cluster_path)
+        metrics = evaluate(true_labels, cluster_ids, class_names, top_k=top_k)
+        all_metrics[method_name] = metrics
+
+        n_noise    = int((cluster_ids < 0).sum())
+        noise_pct  = n_noise / len(cluster_ids)
+
+        metrics_table([
+            {"label": "ARI",       "value": metrics["ari"]},
+            {"label": "NMI",       "value": metrics["nmi"]},
+            {"label": "Accuracy",  "value": metrics["accuracy"]},
+            {"label": "Clusters",  "value": len(set(cluster_ids[cluster_ids >= 0])),
+             "note": "/ " + str(len(class_names)) + " expected"},
+            {"label": "Noise",     "value": "{:.1%}".format(noise_pct)},
+            {"label": "Time",      "value": "{:.1f}s".format(time.time() - t0)},
+        ], title=method_name + "  results")
+
+        # Figures for this method
+        valid = cluster_ids >= 0
+        plot_embedding(
+            features_2d[valid], cluster_ids[valid],
+            title       = "2D Embedding  --  " + method_name + " Clusters",
+            class_names = [str(i) for i in range(int(cluster_ids[valid].max()) + 1)],
+            config      = config,
+            output_dir  = figures_dir,
+            filename    = "embedding_clusters_" + method_name + ".png",
+        )
+
+        mapping     = np.array(metrics["mapping"])
+        pred_labels = mapping[cluster_ids[valid]]
+        plot_confusion_heatmap(
+            true_labels[valid], pred_labels,
+            class_names = class_names,
+            config      = config,
+            output_dir  = figures_dir,
+            filename    = "confusion_matrix_" + method_name + ".png",
+        )
+        plot_top_confusions(
+            metrics["confusion_pairs_df"], config,
+            output_dir = figures_dir,
+            filename   = "top_confusions_" + method_name + ".png",
+        )
+        plot_cluster_sizes(
+            cluster_ids, config,
+            output_dir = figures_dir,
+            filename   = "cluster_sizes_" + method_name + ".png",
+        )
+        plot_per_class_accuracy(
+            metrics["per_class_df"], config,
+            output_dir = figures_dir,
+            filename   = "per_class_accuracy_" + method_name + ".png",
+        )
+
+    # Cross-method comparison
+    if len(all_metrics) > 1:
+        subheader("Method comparison figure")
+        plot_method_comparison(
+            all_metrics, config,
+            output_dir = figures_dir,
+            filename   = "method_comparison.png",
+        )
+
+        # CLI comparison table
+        methods = list(all_metrics.keys())
+        comparison_table(
+            methods=methods,
+            metrics={
+                "ARI":      {m: all_metrics[m]["ari"]      for m in methods},
+                "NMI":      {m: all_metrics[m]["nmi"]      for m in methods},
+                "Accuracy": {m: all_metrics[m]["accuracy"] for m in methods},
+            },
+            title="All Methods  --  Final Scores"
+        )
+        best = max(methods, key=lambda m: all_metrics[m]["ari"])
+        verdict(best, "highest ARI = {:.4f}".format(all_metrics[best]["ari"]))
+
+    # Save metrics
+    subheader("Saving metrics")
+    metrics_json = {n: metrics_to_json_safe(m) for n, m in all_metrics.items()}
+    json_path = os.path.join(output_dir, "metrics.json")
+    with open(json_path, "w") as f:
+        json.dump(metrics_json, f, indent=2)
+    saved("metrics.json", json_path)
+
+    csv_path = os.path.join(output_dir, "metrics_summary.csv")
+    build_summary_csv(all_metrics, csv_path)
+    saved("metrics_summary.csv", csv_path)
+
+    done(output_dir)
+
+
+if __name__ == "__main__":
+    main()
