@@ -72,9 +72,9 @@ The **BioCLIP Clustering Pipeline** is a modular, reproducible research system f
 
 | Dataset | Species | Images | Format | Notes |
 |---------|---------|--------|--------|-------|
-| EU-Moth | 200 | ~4,400 | ImageFolder | European moth species |
+| EU-Moth | 200 | 2,205 | ImageFolder | European moth species |
 | CUB-200-2011 | 200 | 11,788 | CUB annotation files | Caltech-UCSD birds |
-| MothSpeciesDK | 351 | ~17,000 | ImageFolder | Danish moth species, long-tailed |
+| MothSpeciesDK | 351 | ~19,000 | ImageFolder | Danish moth species, long-tailed |
 
 ---
 
@@ -562,7 +562,7 @@ Memory (full)  = K × D² × 8 bytes
                 = 351 × 768² × 8 bytes ≈ 1.66 GB  (for MothDK)
 ```
 
-In practice, with N ≈ 4,400 images and D = 768 dimensions, the M-step for `full` covariance requires inverting nearly-singular matrices (N ≪ D), making the EM algorithm numerically unstable and memory-intensive.
+In practice, with N ≈ 2,205 images (EU-Moth) and D = 768 dimensions, the M-step for `full` covariance requires inverting nearly-singular matrices (N ≪ D), making the EM algorithm numerically unstable and memory-intensive.
 
 **`diag` covariance** assumes independent feature dimensions — the covariance is a diagonal matrix parameterised by D scalars per component:
 
@@ -1224,7 +1224,7 @@ seed: 42                                # Global random seed
 
 dbscan:
   pca_components: 100
-  min_samples: 5                        # Rule of thumb: ln(N) ≈ 8 for N=4400
+  min_samples: 5                        # Rule of thumb: ln(N) ≈ 8 for N=2205
   eps_range: null                       # null = auto from k-distance knee
   final_eps: null                       # null = auto from sweep
 
@@ -1566,7 +1566,7 @@ DINOv2 is ~3–4× slower due to smaller batch size and larger input resolution.
 
 **Chosen:** `covariance_type: diag`
 **Rejected:** `full`
-**Reason:** `full` covariance with D=768, K=200 requires ~950 MB of parameters and nearly-singular matrix inversions (N=4400 ≪ D²=589,824). `diag` reduces this to 1.2 MB and is numerically stable. See Section 5.4.
+**Reason:** `full` covariance with D=768, K=200 requires ~950 MB of parameters and nearly-singular matrix inversions (N=2205 ≪ D²=589,824). `diag` reduces this to 1.2 MB and is numerically stable. See Section 5.4.
 
 ### Decision 5: Text encoder loaded once, shared
 
@@ -1578,7 +1578,7 @@ DINOv2 is ~3–4× slower due to smaller batch size and larger input resolution.
 
 **Chosen:** Compute once → `features_2d.npy` → reuse
 **Rejected:** Recompute per CLI step
-**Reason:** UMAP on N=4,400 images takes ~60 seconds. All CLI steps (cluster.py, evaluate.py, diagnose.py) need the same projection for visualisation. Caching avoids redundant computation and ensures consistency (same 2D positions across all figures).
+**Reason:** UMAP on N=2,205 images (EU-Moth) or N=11,788 (CUB-200) takes significant time. All CLI steps (cluster.py, evaluate.py, diagnose.py) need the same projection for visualisation. Caching avoids redundant computation and ensures consistency (same 2D positions across all figures).
 
 ### Decision 7: Alphabetical class sorting
 
