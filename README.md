@@ -232,4 +232,3 @@ And the benchmark datasets used:
 
 - **EU-Moth**: Korsch et al., *Deep Learning Pipeline for Automated Visual Moth Monitoring*, INFORMATIK 2021.
 - **CUB-200-2011**: Wah et al., Caltech-UCSD Birds-200-2011 Dataset, Tech. Report CNS-TR-2011-001, 2011.
-- **MothSpeciesDK**: Bjerge et al., *An Automated Light Trap to Monitor Moths Using Computer Vision-Based Tracking and Deep Learning*, Sensors 21(2), 2021.
