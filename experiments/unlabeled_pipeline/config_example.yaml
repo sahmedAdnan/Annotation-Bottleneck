@@ -1,0 +1,83 @@
+# -------------------------------------------------------
+# Config: Unlabeled Specimen Identification Pipeline
+# -------------------------------------------------------
+# Scenario: "I have unknown moth images from Europe.
+#            Help me identify them."
+# -------------------------------------------------------
+
+# Path to folder containing unknown images (flat directory, no subfolders needed)
+images_dir: D:\Thesis\Test 1st\eu-moths-dataset-main\eu-moths-dataset-main\images
+
+# GBIF query settings: what taxon, where
+gbif:
+  order_key: 797              # Single: 797 = Lepidoptera. Multi-taxa: [797, 7192]
+                              # Common keys: 797=Lepidoptera, 7192=Aves, 1457=Coleoptera
+  region: europe              # europe, asia, africa, north_america, south_america, oceania
+  query_mode: balanced        # "balanced" = per-family coverage, "flat" = top-N globally
+  per_family: 40              # common species per family (balanced mode)
+  rare_per_family: 10         # rare tail species per family (balanced mode)
+  n_candidates: 400           # only used in flat mode
+  include_rare: true          # only used in flat mode
+  images_per_species: 3       # reference image URLs per candidate (loaded from GBIF on-the-fly)
+
+# BioCLIP-2 model settings
+model:
+  name: bioclip2
+  pretrained: hf-hub:imageomics/bioclip-2
+  normalize_embeddings: true
+  batch_size: 64
+  num_workers: 8
+
+  # Taxonomic prompt templates for text matching.
+  # {name}, {genus}, {family}, {order} are filled from GBIF taxonomy.
+  prompt_templates:
+    - "{name}"
+    - "a photo of {name}"
+    - "a photo of {name}, a moth"
+    - "{name}, family {family}, order {order}"
+    - "a species of genus {genus}, family {family}"
+
+# Clustering settings
+# For unknown images, HDBSCAN is ideal (no need to guess n_clusters)
+clustering:
+  method: hdbscan
+  params:
+    min_cluster_size: 5       # minimum images to form a cluster
+    # min_samples: defaults to min_cluster_size (HDBSCAN library default)
+
+# Dimensionality reduction for density-based clustering
+reduction:
+  partition:
+    method: pca
+    n_components: 50
+  density:
+    method: umap
+    n_components: 100          # lower than 100 for small datasets
+    n_neighbors: 15           # lower for small datasets
+    min_dist: 0.1
+    metric: cosine
+
+# Annotation uncertainty settings
+annotation:
+  uncertainty:
+    review_threshold: 0.55    # flag for review if combined >= 0.55
+    human_threshold: 0.70     # flag as human_required if combined >= 0.70
+    weights:
+      text_margin: 0.35
+      membership_probability: 0.25
+      cluster_agreement: 0.25
+      taxonomic_consistency: 0.15
+
+# Visualization
+visualization:
+  method: umap
+  umap:
+    n_neighbors: 15
+    min_dist: 0.1
+    metric: cosine
+    random_state: 42
+  dpi: 300
+  export_pdf: false
+
+output_dir: results/unlabeled_test
+seed: 42

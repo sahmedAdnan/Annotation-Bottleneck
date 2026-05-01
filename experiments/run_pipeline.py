@@ -3,25 +3,13 @@ experiments/run_pipeline.py
 ----------------------------
 Unified runner: execute the full BioCLIP clustering pipeline in one command.
 
-4 steps, in order:
-    1. extract   -- extract BioCLIP-2 image embeddings, save features.npz
-    2. cluster   -- run ALL clustering methods (KMeans, text-guided KMeans,
-                    Agglomerative, Spectral, DBSCAN, HDBSCAN).
-                    Methods to run are defined in configs/eumoth.yaml under
-                    clustering.methods. DBSCAN and HDBSCAN run their full
-                    diagnostic pipelines (PCA, sweep, figures) from here.
+3 steps, in order:
+    1. extract   -- extract image embeddings (BioCLIP-2, BioCLIP, CLIP, DINOv2)
+    2. cluster   -- run ALL clustering methods (KMeans, Agglomerative, Spectral,
+                    GMM, DBSCAN, HDBSCAN). Methods are defined in the YAML config.
     3. evaluate  -- evaluate all cluster results, generate publication figures
-    4. diagnose  -- feature quality checks, 1-NN accuracy, silhouette scores
 
-WHY 4 STEPS (NOT 5):
-    Density clustering (DBSCAN, HDBSCAN) is clustering. It belongs in step 2
-    alongside KMeans and Agglomerative. Separating it into a dedicated step
-    implied it was a different kind of operation — it is not. All methods that
-    assign images to groups run in step 2.
-
-EACH STEP IS SKIPPABLE:
-    Features and 2D projections are cached on disk, so re-runs are fast.
-    Skip flags let you resume from any point.
+Each step is skippable. Features and 2D projections are cached on disk.
 
 Usage:
     # Run everything from scratch
@@ -30,21 +18,17 @@ Usage:
     # Resume from clustering (features already extracted)
     python experiments/run_pipeline.py --config configs/eumoth.yaml --skip-extract
 
-    # Skip HDBSCAN only (if not installed)
-    python experiments/run_pipeline.py --config configs/eumoth.yaml --skip-hdbscan
-
     # Skip both density methods
     python experiments/run_pipeline.py --config configs/eumoth.yaml --skip-density
 
-    # Re-run only evaluation figures (clustering already done)
+    # Re-run only evaluation figures
     python experiments/run_pipeline.py --config configs/eumoth.yaml \\
-        --skip-extract --skip-cluster --skip-diagnose
+        --skip-extract --skip-cluster
 
 Each CLI step also works standalone:
     python cli/extract.py   --config configs/eumoth.yaml
     python cli/cluster.py   --config configs/eumoth.yaml
     python cli/evaluate.py  --config configs/eumoth.yaml
-    python cli/diagnose.py  --config configs/eumoth.yaml
 """
 
 import argparse
@@ -57,7 +41,6 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import cli.extract  as step_extract
 import cli.cluster  as step_cluster
 import cli.evaluate as step_evaluate
-import cli.diagnose as step_diagnose
 
 
 # -------------------------------------------------------
@@ -106,8 +89,6 @@ def main():
                         help="Skip Step 2: all clustering methods.")
     parser.add_argument("--skip-evaluate", action="store_true",
                         help="Skip Step 3: evaluation and figures.")
-    parser.add_argument("--skip-diagnose", action="store_true",
-                        help="Skip Step 4: diagnostics.")
 
     # Density method flags (only relevant when step 2 runs)
     parser.add_argument("--skip-density",  action="store_true",
@@ -129,7 +110,6 @@ def main():
     if not args.skip_extract:  steps_active.append("extract")
     if not args.skip_cluster:  steps_active.append("cluster")
     if not args.skip_evaluate: steps_active.append("evaluate")
-    if not args.skip_diagnose: steps_active.append("diagnose")
 
     print("  Config : " + args.config)
     print("  Steps  : " + "  >  ".join(steps_active) if steps_active
@@ -138,7 +118,7 @@ def main():
     # ---- Step 1: Extract ----
     if not args.skip_extract:
         timings["extract"] = _run_step(
-            "1/4  Feature Extraction",
+            "1/3  Feature Extraction",
             step_extract.main,
             args.config,
         )
@@ -147,15 +127,13 @@ def main():
 
     # ---- Step 2: Cluster (ALL methods, including density) ----
     if not args.skip_cluster:
-        # Translate top-level skip flags into config overrides.
-        # cluster.py reads skip_density, skip_dbscan, skip_hdbscan from kwargs.
         cluster_kwargs = {
             "skip_density":  args.skip_density,
             "skip_dbscan":   args.skip_dbscan  or args.skip_density,
             "skip_hdbscan":  args.skip_hdbscan or args.skip_density,
         }
         timings["cluster"] = _run_step(
-            "2/4  Clustering  (KMeans / Agglomerative / Spectral / DBSCAN / HDBSCAN)",
+            "2/3  Clustering  (KMeans / Agglomerative / Spectral / DBSCAN / HDBSCAN)",
             step_cluster.main,
             args.config,
             **cluster_kwargs,
@@ -166,22 +144,12 @@ def main():
     # ---- Step 3: Evaluate ----
     if not args.skip_evaluate:
         timings["evaluate"] = _run_step(
-            "3/4  Evaluation + Publication Figures",
+            "3/3  Evaluation + Publication Figures",
             step_evaluate.main,
             args.config,
         )
     else:
         print("\n  [skip] Step 3: Evaluation")
-
-    # ---- Step 4: Diagnose ----
-    if not args.skip_diagnose:
-        timings["diagnose"] = _run_step(
-            "4/4  Diagnostics",
-            step_diagnose.main,
-            args.config,
-        )
-    else:
-        print("\n  [skip] Step 4: Diagnostics")
 
     # ---- Final summary ----
     total = time.time() - wall_start

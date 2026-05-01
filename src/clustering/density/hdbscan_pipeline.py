@@ -3,24 +3,19 @@ src/clustering/density/hdbscan_pipeline.py
 -------------------------------------------
 HDBSCAN diagnostic, tuning, and evaluation pipeline.
 
-WHY HDBSCAN OVER DBSCAN FOR THIS DATASET:
+Feature space:
+    By default, the pipeline receives UMAP-100D pre-reduced features from
+    the caller.  UMAP preserves local neighborhood topology, aligning with
+    HDBSCAN's density-based objective. Validated on EU-Moth (ARI=0.9722)
+    and CUB-200 (ARI=0.8745).
 
-    DBSCAN has one fundamental weakness for fine-grained biological datasets:
-    it uses a single global eps threshold. If the density of clusters varies
-    across the embedding space (which it does — common species with many images
-    form denser clusters than rare species with few images), then:
+    Falls back to internal PCA if no pre-reduced features are provided.
 
-    - A small eps correctly separates dense clusters but labels sparse ones as noise
-    - A large eps merges sparse clusters correctly but merges dense ones too
-
-    HDBSCAN solves this by building a full hierarchy of density levels and
-    extracting stable clusters at each level. It uses a *minimum spanning tree*
-    over the mutual reachability distance graph, so it adapts the effective eps
-    per region rather than using one global value.
-
-    For EU-Moth (200 species, ~22 images/class on average, variable cluster density),
-    HDBSCAN is a strictly better choice than DBSCAN. It should be used as the
-    primary density-based method, with DBSCAN as the ablation baseline.
+WHY HDBSCAN OVER DBSCAN:
+    DBSCAN uses a single global eps threshold. HDBSCAN adapts density
+    thresholds per region via a hierarchy over mutual reachability distances.
+    For fine-grained biological datasets with variable cluster density,
+    HDBSCAN is the more robust choice.
 
 Requirements:
     pip install hdbscan
@@ -29,7 +24,9 @@ Usage:
     from src.clustering.density.hdbscan_pipeline import HDBSCANPipeline
     pipeline = HDBSCANPipeline(config)
     results  = pipeline.run(features, true_label_ids, class_names,
-                             features_2d, output_dir)
+                             features_2d, output_dir,
+                             features_reduced=umap_features,
+                             reduction_label="UMAP-100D")
 """
 
 import os
@@ -48,8 +45,6 @@ from typing import List
 
 matplotlib.use("Agg")
 
-import sys
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 from src.evaluation.metrics       import hungarian_accuracy, per_class_accuracy, top_k_confusion_pairs
 from .dbscan_pipeline              import (
     prepare_features, plot_cluster_sizes,
@@ -63,7 +58,9 @@ from .dbscan_pipeline              import (
 
 def hdbscan_sweep(features: np.ndarray, true_label_ids: np.ndarray,
                   min_cluster_sizes: List[int],
-                  output_dir: str, export_pdf: bool = False) -> pd.DataFrame:
+                  output_dir: str, export_pdf: bool = False,
+                  n_true_classes: int = None,
+                  cluster_selection_method: str = "eom") -> pd.DataFrame:
     """
     Sweep over min_cluster_size (the main HDBSCAN hyperparameter).
 
@@ -77,7 +74,7 @@ def hdbscan_sweep(features: np.ndarray, true_label_ids: np.ndarray,
         We sweep from 3 to 30 to cover the full picture.
 
     Args:
-        features:         PCA-reduced feature array.
+        features:         Reduced feature array (UMAP-100D or PCA).
         true_label_ids:   Integer ground-truth IDs.
         min_cluster_sizes: List of values to try.
         output_dir:       Where to save the sweep plot.
@@ -99,10 +96,10 @@ def hdbscan_sweep(features: np.ndarray, true_label_ids: np.ndarray,
     rows = []
     for mcs in min_cluster_sizes:
         clusterer = hdbscan_lib.HDBSCAN(
-            min_cluster_size = mcs,
-            min_samples      = None,   # defaults to min_cluster_size
-            metric           = "euclidean",
-            cluster_selection_method = "eom",  # Excess of Mass — more stable
+            min_cluster_size         = mcs,
+            min_samples              = None,   # defaults to min_cluster_size
+            metric                   = "euclidean",
+            cluster_selection_method = cluster_selection_method,
         )
         labels = clusterer.fit_predict(features)
 
@@ -124,6 +121,7 @@ def hdbscan_sweep(features: np.ndarray, true_label_ids: np.ndarray,
             noise_pct=noise_pct,
             ari=ari,
             nmi=nmi,
+            weighted_ari=ari * (1.0 - noise_pct),
         ))
         print(f"    mcs={mcs:3d} -> clusters={n_clusters:4d}, "
               f"noise={noise_pct:.1%}, ARI={ari:.4f}")
@@ -140,6 +138,9 @@ def hdbscan_sweep(features: np.ndarray, true_label_ids: np.ndarray,
     axes[0].plot(df["min_cluster_size"], df["nmi"],
                  color="#55A868", linewidth=2, marker="s", markersize=5,
                  linestyle="--", label="NMI")
+    axes[0].plot(df["min_cluster_size"], df["weighted_ari"],
+                 color="#FF7F0E", linewidth=2, marker="^", markersize=5,
+                 linestyle=":", label="Weighted ARI (ARI×coverage)")
     axes[0].set_xlabel("min_cluster_size")
     axes[0].set_ylabel("Score")
     axes[0].set_title("Quality vs min_cluster_size")
@@ -158,8 +159,9 @@ def hdbscan_sweep(features: np.ndarray, true_label_ids: np.ndarray,
 
     axes[2].plot(df["min_cluster_size"], df["n_clusters"],
                  color="#8172B2", linewidth=2, marker="^", markersize=5)
-    axes[2].axhline(y=200, color="#FF7F0E", linestyle="--", linewidth=1.5,
-                    label="True # classes (200)")
+    _true_k = n_true_classes if n_true_classes is not None else 200
+    axes[2].axhline(y=_true_k, color="#FF7F0E", linestyle="--", linewidth=1.5,
+                    label=f"True # classes ({_true_k})")
     axes[2].set_xlabel("min_cluster_size")
     axes[2].set_ylabel("Clusters Found")
     axes[2].set_title("Clusters Found vs min_cluster_size")
@@ -189,12 +191,13 @@ def hdbscan_fit_and_evaluate(features: np.ndarray,
                               class_names: List[str],
                               min_cluster_size: int,
                               min_samples: int = None,
-                              top_k: int = 20) -> dict:
+                              top_k: int = 20,
+                              cluster_selection_method: str = "eom") -> dict:
     """
     Fit HDBSCAN with chosen parameters and compute all metrics.
 
     Args:
-        features:          PCA-reduced feature array.
+        features:          Reduced feature array (UMAP-100D or PCA).
         true_label_ids:    Integer class IDs.
         class_names:       Class name strings.
         min_cluster_size:  Main HDBSCAN hyperparameter.
@@ -207,17 +210,20 @@ def hdbscan_fit_and_evaluate(features: np.ndarray,
     except ImportError:
         raise ImportError("HDBSCAN requires: pip install hdbscan")
 
-    print(f"\n  [hdbscan] Fitting: "
+    import time as _time
+    print(f"\n  [hdbscan] Final fit: "
           f"min_cluster_size={min_cluster_size}, "
-          f"min_samples={min_samples or min_cluster_size}")
+          f"min_samples={min_samples or min_cluster_size} ...")
+    _t0 = _time.time()
 
     clusterer = hdbscan_lib.HDBSCAN(
         min_cluster_size         = min_cluster_size,
         min_samples              = min_samples,
         metric                   = "euclidean",
-        cluster_selection_method = "eom",
+        cluster_selection_method = cluster_selection_method,
     )
     labels = clusterer.fit_predict(features)
+    print(f"  [hdbscan] Fit completed in {_time.time() - _t0:.1f}s")
 
     n_total    = len(labels)
     n_noise    = int((labels == -1).sum())
@@ -264,6 +270,7 @@ def hdbscan_fit_and_evaluate(features: np.ndarray,
         "conf_df":          conf_df,
         # HDBSCAN-specific: soft cluster memberships and outlier scores
         "outlier_scores":   getattr(clusterer, "outlier_scores_", None),
+        "probabilities":    getattr(clusterer, "probabilities_", None),
     }
 
 
@@ -316,7 +323,8 @@ def plot_umap_hdbscan(features_2d: np.ndarray, hdbscan_labels: np.ndarray,
                       true_label_ids: np.ndarray,
                       results: dict,
                       output_dir: str, export_pdf: bool = False,
-                      subsample: int = 6000) -> None:
+                      subsample: int = 6000,
+                      dataset_label: str = "") -> None:
     """
     Side-by-side scatter: true labels vs HDBSCAN clusters.
     Same layout as the DBSCAN plot for direct visual comparison.
@@ -337,8 +345,10 @@ def plot_umap_hdbscan(features_2d: np.ndarray, hdbscan_labels: np.ndarray,
     noise_pct  = results["noise_pct"]
 
     fig, axes = plt.subplots(1, 2, figsize=(16, 7))
-    fig.suptitle("HDBSCAN Clustering on BioCLIP-2 Embeddings (EU-Moth)",
-                 fontsize=14, y=1.01)
+    title = "HDBSCAN Clustering on BioCLIP-2 Embeddings"
+    if dataset_label:
+        title += f" ({dataset_label})"
+    fig.suptitle(title, fontsize=14, y=1.01)
 
     # Panel A: True labels
     axes[0].scatter(
@@ -400,7 +410,9 @@ def plot_umap_hdbscan(features_2d: np.ndarray, hdbscan_labels: np.ndarray,
 # -------------------------------------------------------
 
 def plot_method_comparison(dbscan_results: dict, hdbscan_results: dict,
-                            output_dir: str, export_pdf: bool = False) -> None:
+                            output_dir: str, export_pdf: bool = False,
+                            dataset_label: str = "",
+                            n_true_classes: int = None) -> None:
     """
     Side-by-side bar chart comparing DBSCAN and HDBSCAN on ARI, NMI,
     Accuracy, cluster count, and noise %.
@@ -418,9 +430,10 @@ def plot_method_comparison(dbscan_results: dict, hdbscan_results: dict,
                    hdbscan_results["n_clusters"]]
 
     fig, axes = plt.subplots(1, 3, figsize=(15, 6))
-    fig.suptitle("DBSCAN vs HDBSCAN — Density Clustering Comparison  "
-                 "(EU-Moth, 200 Species)",
-                 fontsize=13, y=1.02)
+    title = "DBSCAN vs HDBSCAN — Density Clustering Comparison"
+    if dataset_label:
+        title += f"  ({dataset_label})"
+    fig.suptitle(title, fontsize=13, y=1.02)
 
     x       = np.arange(len(methods))
     w       = 0.25
@@ -451,8 +464,9 @@ def plot_method_comparison(dbscan_results: dict, hdbscan_results: dict,
     # Panel 2: # Clusters
     c_bars = axes[1].bar(methods, clust_vals,
                          color=[palette[0], palette[1]], alpha=0.85)
-    axes[1].axhline(200, color="#FF7F0E", linestyle="--",
-                    linewidth=1.5, label="True # classes (200)")
+    _true_k = n_true_classes if n_true_classes is not None else 200
+    axes[1].axhline(_true_k, color="#FF7F0E", linestyle="--",
+                    linewidth=1.5, label=f"True # classes ({_true_k})")
     for bar, val in zip(c_bars, clust_vals):
         axes[1].text(bar.get_x() + bar.get_width() / 2,
                      bar.get_height() + 1,
@@ -513,9 +527,19 @@ class HDBSCANPipeline:
             list(range(3, 31, 3))   # [3, 6, 9, 12, 15, 18, 21, 24, 27, 30]
         )
 
+        # "eom" (Excess of Mass, default) merges nested sub-clusters → fewer,
+        # larger clusters. Good for compact balanced datasets.
+        # "leaf" extracts finest-grained leaf nodes → more, smaller clusters.
+        # Recommended for long-tailed datasets with many small classes.
+        self.cluster_selection_method = self.h_cfg.get(
+            "cluster_selection_method", "eom"
+        )
+
     def run(self, features: np.ndarray, true_label_ids: np.ndarray,
             class_names: List[str], features_2d: np.ndarray,
-            output_dir: str) -> dict:
+            output_dir: str,
+            features_reduced: np.ndarray = None,
+            reduction_label: str = None) -> dict:
 
         fig_dir = os.path.join(output_dir, "figures")
         os.makedirs(fig_dir, exist_ok=True)
@@ -526,22 +550,37 @@ class HDBSCANPipeline:
         print("HDBSCAN PIPELINE")
         print("=" * 60)
 
-        # Step 0: PCA (same reduction as DBSCAN for fair comparison)
-        print("\n[Step 0] Feature space preparation (PCA) ...")
-        features_pca, _ = prepare_features(features, self.n_pca)
+        # Step 0: Feature space preparation
+        if features_reduced is not None:
+            label = reduction_label or f"external-{features_reduced.shape[1]}D"
+            print(f"\n[Step 0] Using pre-reduced features: {label} "
+                  f"({features_reduced.shape[1]}D)")
+            features_pca = features_reduced
+        else:
+            print("\n[Step 0] Feature space preparation (PCA fallback) ...")
+            features_pca, _ = prepare_features(features, self.n_pca)
 
         # Step 1: Sweep
         print("\n[Step 1] min_cluster_size sweep ...")
         sweep_df = hdbscan_sweep(
             features_pca, true_label_ids,
-            self.sweep_range, fig_dir, self.export_pdf
+            self.sweep_range, fig_dir, self.export_pdf,
+            n_true_classes           = len(class_names),
+            cluster_selection_method = self.cluster_selection_method,
         )
 
-        # Step 2: Best min_cluster_size
-        best_row = sweep_df.loc[sweep_df["ari"].idxmax()]
+        # Step 2: Best min_cluster_size by coverage-weighted ARI.
+        # Weighted ARI = ARI × (1 − noise_pct) penalises configurations that
+        # discard large fractions of data as noise. Raw ARI alone would favour
+        # high-mcs solutions that score well on a small filtered subset while
+        # ignoring the rest — this is especially misleading on long-tailed
+        # datasets where many rare classes become noise at large mcs.
+        best_row = sweep_df.loc[sweep_df["weighted_ari"].idxmax()]
         best_mcs = int(best_row["min_cluster_size"])
         print(f"\n[Step 2] Best min_cluster_size: {best_mcs}  "
-              f"(ARI={best_row['ari']:.4f})")
+              f"(weighted ARI={best_row['weighted_ari']:.4f}, "
+              f"raw ARI={best_row['ari']:.4f}, "
+              f"noise={best_row['noise_pct']:.1%})")
 
         final_mcs = self.h_cfg.get("final_min_cluster_size", best_mcs)
         if final_mcs != best_mcs:
@@ -551,18 +590,27 @@ class HDBSCANPipeline:
         print("\n[Step 3] Final HDBSCAN fit ...")
         results = hdbscan_fit_and_evaluate(
             features_pca, true_label_ids, class_names,
-            min_cluster_size = final_mcs,
-            min_samples      = self.h_cfg.get("min_samples", None),
-            top_k = self.config.get("evaluation", {}).get("top_k_confusions", 20),
+            min_cluster_size         = final_mcs,
+            min_samples              = self.h_cfg.get("min_samples", None),
+            top_k                    = self.config.get("evaluation", {}).get("top_k_confusions", 20),
+            cluster_selection_method = self.cluster_selection_method,
         )
-        results["pca_components"] = self.n_pca
+        if features_reduced is not None:
+            results["reduction"] = reduction_label or "external"
+        else:
+            results["reduction"] = f"PCA-{self.n_pca}D"
+            results["pca_components"] = self.n_pca
 
         # Step 4: Figures
         print("\n[Step 4] Generating publication figures ...")
 
+        ds       = self.config.get("dataset", {})
+        ds_name = ds.get('name', '')
+        ds_classes = ds.get('num_classes', '')
+        ds_label = f"{ds_name}, {ds_classes} Species" if ds_name else f"{ds_classes} Species"
         plot_umap_hdbscan(
             features_2d, results["labels"], true_label_ids,
-            results, fig_dir, self.export_pdf
+            results, fig_dir, self.export_pdf, dataset_label=ds_label
         )
 
         plot_cluster_sizes(results["labels"], fig_dir, self.export_pdf,

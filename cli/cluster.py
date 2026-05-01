@@ -3,20 +3,21 @@ cli/cluster.py
 --------------
 CLI command: Run ALL clustering methods defined in config.
 
-This includes both partition-based methods (KMeans, Spectral, Agglomerative)
-and density-based methods (DBSCAN, HDBSCAN). All clustering algorithms belong
-here — they solve the same problem and should be configured and run from one
-place.
+Dual-path dimensionality reduction (empirically validated):
+
+    Partition methods (kmeans, spectral, agglomerative, gmm)
+        -> PCA-50D  (variance-maximization aligns with partition objectives)
+
+    Density methods (dbscan, hdbscan)
+        -> UMAP-100D  (topology-preservation aligns with density objectives)
 
 Routing logic:
-  - kmeans, kmeans_text_guided, spectral, agglomerative, gmm
-        -> standard fit-predict via src/clustering/methods.py
+  - kmeans, spectral, agglomerative, gmm
+        -> PCA-50D features via src/clustering/methods.py
   - dbscan
-        -> full diagnostic pipeline: PCA reduction, k-distance plot,
-           eps sweep, best-eps selection, final fit, figures
+        -> UMAP-100D features via DBSCANPipeline
   - hdbscan
-        -> full diagnostic pipeline: PCA reduction, mcs sweep,
-           final fit, outlier scores, figures
+        -> UMAP-100D features via HDBSCANPipeline
 
 Usage:
     python cli/cluster.py --config configs/eumoth.yaml
@@ -43,63 +44,20 @@ import numpy as np
 import pandas as pd
 
 from src.utils.io      import (set_seed, load_config, load_features,
-                                save_clusters, ensure_dir)
+                                save_clusters, ensure_dir, get_2d_projection)
 from src.utils.pretty  import (header, subheader, metrics_table,
                                 comparison_table, verdict, warning,
                                 done, saved)
 from src.clustering.methods import run_clustering
+from src.reduction import reduce_for_partition, reduce_for_density, get_reduction_config
 
 
 # -------------------------------------------------------
-# Density method names
+# Method classification
 # -------------------------------------------------------
 
-DENSITY_METHODS = {"dbscan", "hdbscan"}
-
-
-# -------------------------------------------------------
-# 2D projection helper (shared with evaluate.py via cache)
-# -------------------------------------------------------
-
-def _get_2d_projection(features, config, output_dir):
-    """Load or compute 2D projection for density visualization."""
-    cache = os.path.join(output_dir, "features_2d.npy")
-    if os.path.exists(cache):
-        print(f"  [proj] Loading cached 2D projection from {cache}")
-        return np.load(cache)
-
-    vis = config["visualization"]
-    method = vis.get("method", "umap")
-
-    if method == "umap":
-        try:
-            import umap as umap_lib
-            cfg = vis["umap"]
-            reducer = umap_lib.UMAP(
-                n_neighbors  = cfg.get("n_neighbors", 30),
-                n_components = 2,
-                min_dist     = max(cfg.get("min_dist", 0.1), 0.05),
-                metric       = cfg.get("metric", "cosine"),
-                random_state = cfg.get("random_state", 42),
-            )
-            print("  [proj] Computing UMAP 2D projection ...")
-            f2d = reducer.fit_transform(features)
-        except ImportError:
-            method = "tsne"
-
-    if method == "tsne":
-        from sklearn.manifold import TSNE
-        cfg = vis.get("tsne", {})
-        reducer = TSNE(n_components=2,
-                       perplexity=cfg.get("perplexity", 40),
-                       random_state=cfg.get("random_state", 42),
-                       init="pca", learning_rate="auto")
-        print("  [proj] Computing t-SNE 2D projection ...")
-        f2d = reducer.fit_transform(features)
-
-    np.save(cache, f2d)
-    print(f"  [proj] Saved to {cache}")
-    return f2d
+DENSITY_METHODS  = {"dbscan", "hdbscan"}
+PARTITION_METHODS = {"kmeans", "spectral", "agglomerative", "gmm"}
 
 
 # -------------------------------------------------------
@@ -107,43 +65,45 @@ def _get_2d_projection(features, config, output_dir):
 # -------------------------------------------------------
 
 def _run_density(method_name, method_cfg, features, true_label_ids,
-                 class_names, features_2d, output_dir, config):
+                 class_names, features_2d, output_dir, config,
+                 features_reduced=None, reduction_label=None):
     """
     Route a density method to its full diagnostic pipeline.
 
-    Merges method-level config params (from clustering.methods entry)
-    with the top-level dbscan/hdbscan config block so both locations
-    work correctly.
+    Args:
+        features_reduced: Pre-reduced features (UMAP-100D). If provided,
+                          the pipeline skips its internal PCA.
+        reduction_label:  Label for the reduction (e.g. "UMAP-100D").
     """
-    # Merge priority: top-level dbscan/hdbscan block WINS over clustering.methods entry.
-    # Reason: the dedicated block (dbscan: pca_components, min_samples, etc.) is the
-    # intentional, detailed configuration. The clustering.methods entry is just a routing
-    # declaration — its parameters are only used as fallback when the dedicated block
-    # does not exist at all.
     merged_config = dict(config)
     if method_name == "dbscan":
-        # Start from method_cfg (routing entry), then let the dedicated block override
         base = {k: v for k, v in method_cfg.items() if k != "name"}
-        base.update(config.get("dbscan", {}))   # top-level block wins
+        base.update(config.get("dbscan", {}))
         merged_config["dbscan"] = base
         from src.clustering.density.dbscan_pipeline import DBSCANPipeline
         pipeline = DBSCANPipeline(merged_config)
 
     elif method_name == "hdbscan":
         base = {k: v for k, v in method_cfg.items() if k != "name"}
-        base.update(config.get("hdbscan", {}))  # top-level block wins
+        base.update(config.get("hdbscan", {}))
         merged_config["hdbscan"] = base
         from src.clustering.density.hdbscan_pipeline import HDBSCANPipeline
         pipeline = HDBSCANPipeline(merged_config)
 
     results = pipeline.run(
-        features, true_label_ids, class_names, features_2d, output_dir
+        features, true_label_ids, class_names, features_2d, output_dir,
+        features_reduced=features_reduced,
+        reduction_label=reduction_label,
     )
 
-    # Save cluster assignments as .npz (same format as other methods)
-    # so evaluate.py can load them for cross-method comparison
     cluster_path = os.path.join(output_dir, f"clusters_{method_name}.npz")
     save_clusters(cluster_path, results["labels"], method_name, method_cfg)
+
+    # Save HDBSCAN membership probabilities for annotation pipeline
+    if method_name == "hdbscan" and results.get("probabilities") is not None:
+        probs_path = os.path.join(output_dir, "hdbscan_probabilities.npy")
+        np.save(probs_path, results["probabilities"])
+        print(f"    [save] HDBSCAN probabilities -> {probs_path}")
 
     return results
 
@@ -222,35 +182,51 @@ def main(config_path: str = None,
     method_configs = config["clustering"]["methods"]
     method_names   = [m["name"] for m in method_configs]
     has_density    = any(n in DENSITY_METHODS for n in method_names)
+    has_partition  = any(n in PARTITION_METHODS for n in method_names)
 
     header(f"CLUSTERING  —  {len(method_configs)} method(s)")
     print(f"\n  Dataset : {features.shape[0]} images | "
           f"{len(class_names)} classes | dim={features.shape[1]}")
     print(f"  Methods : {', '.join(method_names)}")
 
-    # Pre-load text encoder if needed
-    text_centroids = None
-    if "kmeans_text_guided" in method_names:
-        subheader("Loading text encoder for text-guided KMeans")
-        from src.models.extractors import build_extractor
-        extractor = build_extractor(config)
-        templates = config["model"].get("prompt_templates", None)
-        text_centroids = extractor.encode_text(class_names,
-                                               prompt_templates=templates)
+    # ---- Reduction config ----
+    rcfg = get_reduction_config(config)
+    print(f"\n  Reduction (partition) : {rcfg['partition']['method'].upper()}-"
+          f"{rcfg['partition']['n_components']}D")
+    print(f"  Reduction (density)  : {rcfg['density']['method'].upper()}-"
+          f"{rcfg['density']['n_components']}D")
 
-    # Pre-compute 2D projection if any density method is present
+    # ---- PCA reduction for partition methods ----
+    features_pca = None
+    pca_object   = None
+    if has_partition:
+        subheader("Dimensionality reduction for partition methods")
+        features_pca, pca_object, pca_var = reduce_for_partition(
+            features, config, random_state=config.get("seed", 42)
+        )
+
+    # ---- UMAP reduction for density methods ----
+    features_umap = None
+    density_reduction_label = None
+    if has_density:
+        subheader("Dimensionality reduction for density methods")
+        d_cfg = rcfg["density"]
+        density_reduction_label = (f"{d_cfg['method'].upper()}-"
+                                   f"{d_cfg['n_components']}D")
+        features_umap, _ = reduce_for_density(
+            features, config, random_state=config.get("seed", 42)
+        )
+
+    # ---- Pre-compute 2D projection for density visualization ----
     features_2d = None
     if has_density:
         subheader("2D projection for density visualization")
         import warnings
-        # Suppress UMAP's "n_jobs overridden" notice — it fires whenever
-        # random_state is set (deterministic mode disables parallelism).
-        # This is expected behavior, not a problem.
         with warnings.catch_warnings():
             warnings.filterwarnings("ignore",
                 message="n_jobs value.*overridden",
                 category=UserWarning)
-            features_2d = _get_2d_projection(features, config, output_dir)
+            features_2d = get_2d_projection(features, config, output_dir)
 
     # ---- Run each method ----
     all_results  = {}
@@ -262,6 +238,7 @@ def main(config_path: str = None,
         t0 = time.time()
 
         if name in DENSITY_METHODS:
+            print(f"    Reduction: {density_reduction_label or 'UMAP-100D'}")
             # Check skip flags
             if skip_density:
                 print("    [skip] density methods (--skip-density)")
@@ -273,32 +250,33 @@ def main(config_path: str = None,
                 print("    [skip] hdbscan (--skip-hdbscan)")
                 continue
 
-            # Full diagnostic pipeline for density methods
+            # Full diagnostic pipeline with UMAP-reduced features
             results = _run_density(
                 name, method_cfg,
                 features, true_label_ids, class_names,
                 features_2d, output_dir, config,
+                features_reduced=features_umap,
+                reduction_label=density_reduction_label,
             )
             all_results[name] = results
 
         else:
-            # Standard fit-predict for partition methods
-            kwargs = {}
-            if name == "kmeans_text_guided" and text_centroids is not None:
-                kwargs["text_centroids"] = text_centroids
+            # Partition methods: use PCA-reduced features
+            reduction_info = (f"PCA-{features_pca.shape[1]}D"
+                              if features_pca is not None else "Full-D")
+            print(f"    Reduction: {reduction_info}")
+            use_features = features_pca if features_pca is not None else features
 
             cluster_ids = run_clustering(
-                method_name = name,
-                features    = features,
-                params      = method_cfg,
-                **kwargs,
+                method_name=name, features=use_features,
+                params=method_cfg,
             )
             save_clusters(
                 os.path.join(output_dir, f"clusters_{name}.npz"),
                 cluster_ids, name, method_cfg,
             )
 
-            # Quick inline metric preview (full eval is in cli/evaluate.py)
+            # Quick inline metric preview
             from src.evaluation.metrics import hungarian_accuracy
             from sklearn.metrics import adjusted_rand_score, normalized_mutual_info_score
             valid = cluster_ids >= 0
@@ -316,12 +294,15 @@ def main(config_path: str = None,
             }
 
             elapsed = time.time() - t0
+            reduction_info = (f"PCA-{features_pca.shape[1]}D"
+                              if features_pca is not None else "Full-D")
             metrics_table([
                 {"label": "ARI",           "value": ari},
                 {"label": "NMI",           "value": nmi},
                 {"label": "Accuracy",      "value": acc},
                 {"label": "Clusters",      "value": all_results[name]["n_clusters"],
                  "note": f"/ {len(class_names)} expected"},
+                {"label": "Reduction",     "value": reduction_info},
                 {"label": "Time",          "value": f"{elapsed:.1f}s"},
             ], title=f"{name} — quick metrics")
 
@@ -330,9 +311,15 @@ def main(config_path: str = None,
     if len(d_ran) == 2:
         from src.clustering.density.hdbscan_pipeline import plot_method_comparison
         export_pdf = config.get("visualization", {}).get("export_pdf", False)
+        ds         = config.get("dataset", {})
+        ds_name = ds.get('name', '')
+        ds_classes = ds.get('num_classes', '')
+        ds_label = f"{ds_name}, {ds_classes} Species" if ds_name else f"{ds_classes} Species"
         plot_method_comparison(
             d_ran["dbscan"], d_ran["hdbscan"],
             os.path.join(output_dir, "figures"), export_pdf,
+            dataset_label=ds_label,
+            n_true_classes=len(class_names),
         )
 
     # ---- Final comparison ----

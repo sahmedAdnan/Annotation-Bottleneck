@@ -26,7 +26,8 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.utils.io           import (set_seed, load_config, load_features,
-                                    load_clusters, ensure_dir)
+                                    load_clusters, ensure_dir,
+                                    get_2d_projection)
 from src.evaluation.metrics import evaluate, metrics_to_json_safe, build_summary_csv
 from src.utils.pretty       import (header, subheader, metrics_table,
                                     comparison_table, verdict, done, saved)
@@ -38,48 +39,8 @@ from src.visualization.plots import (
     plot_intra_inter_distances,
     plot_method_comparison,
     plot_per_class_accuracy,
+    plot_cluster_purity,
 )
-
-
-def _get_2d_projection(features, config, output_dir):
-    """Load cached projection or compute fresh."""
-    cache = os.path.join(output_dir, "features_2d.npy")
-    if os.path.exists(cache):
-        print("    [proj]  Loading cached 2D projection")
-        return np.load(cache)
-
-    vis = config["visualization"]
-    method = vis.get("method", "umap")
-    if method == "umap":
-        try:
-            import umap as umap_lib
-        except ImportError:
-            method = "tsne"
-
-    if method == "umap":
-        cfg = vis["umap"]
-        import umap as umap_lib
-        reducer = umap_lib.UMAP(
-            n_neighbors  = cfg.get("n_neighbors", 30),
-            n_components = 2,
-            min_dist     = cfg.get("min_dist", 0.1),
-            metric       = cfg.get("metric", "cosine"),
-            random_state = cfg.get("random_state", 42),
-        )
-        print("    [proj]  Computing UMAP 2D projection ...")
-        f2d = reducer.fit_transform(features)
-    else:
-        from sklearn.manifold import TSNE
-        cfg = vis.get("tsne", {})
-        reducer = TSNE(n_components=2, perplexity=cfg.get("perplexity", 40),
-                       random_state=cfg.get("random_state", 42),
-                       init="pca", learning_rate="auto")
-        print("    [proj]  Computing t-SNE 2D projection ...")
-        f2d = reducer.fit_transform(features)
-
-    np.save(cache, f2d)
-    saved("features_2d.npy", cache)
-    return f2d
 
 
 def main(config_path: str = None) -> None:
@@ -116,10 +77,11 @@ def main(config_path: str = None) -> None:
         warnings.filterwarnings("ignore",
             message="n_jobs value.*overridden",
             category=UserWarning)
-        features_2d = _get_2d_projection(features, config, output_dir)
+        features_2d = get_2d_projection(features, config, output_dir)
 
     # True-label embedding (shared reference figure)
     subheader("True-label embedding")
+    print("    Generating true-label embedding scatter ...")
     plot_embedding(
         features_2d, true_labels,
         title       = "2D Embedding  --  True Labels  (" + config["dataset"]["name"] + ")",
@@ -131,6 +93,7 @@ def main(config_path: str = None) -> None:
 
     # Intra/inter distances (computed once)
     subheader("Embedding separation quality")
+    print("    Computing intra/inter class distances ...")
     plot_intra_inter_distances(
         features, true_labels, config,
         output_dir = figures_dir,
@@ -169,6 +132,7 @@ def main(config_path: str = None) -> None:
         ], title=method_name + "  results")
 
         # Figures for this method
+        print(f"    Generating figures for {method_name} ...")
         valid = cluster_ids >= 0
         plot_embedding(
             features_2d[valid], cluster_ids[valid],
@@ -204,9 +168,23 @@ def main(config_path: str = None) -> None:
             filename   = "per_class_accuracy_" + method_name + ".png",
         )
 
+        # Save per-cluster purity CSV
+        purity_csv = os.path.join(output_dir,
+                                  "per_cluster_purity_" + method_name + ".csv")
+        metrics["per_cluster_df"].to_csv(purity_csv, index=False)
+        saved("per_cluster_purity_" + method_name + ".csv", purity_csv)
+
+        # Per-cluster purity figure
+        plot_cluster_purity(
+            metrics["per_cluster_df"], config,
+            output_dir = figures_dir,
+            filename   = "per_cluster_purity_" + method_name + ".png",
+        )
+
     # Cross-method comparison
     if len(all_metrics) > 1:
         subheader("Method comparison figure")
+        print("    Generating cross-method comparison ...")
         plot_method_comparison(
             all_metrics, config,
             output_dir = figures_dir,

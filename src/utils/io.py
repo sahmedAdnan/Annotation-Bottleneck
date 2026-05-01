@@ -198,3 +198,76 @@ def load_metrics(path: str) -> dict:
 def ensure_dir(path: str) -> None:
     """Create a directory (and all parents) if it does not already exist."""
     os.makedirs(path, exist_ok=True)
+
+
+# -------------------------------------------------------
+# 2D Projection (shared across all CLI modules)
+# -------------------------------------------------------
+
+def get_2d_projection(features: np.ndarray, config: dict,
+                      output_dir: str) -> np.ndarray:
+    """
+    Load a cached 2D UMAP/t-SNE projection or compute it fresh.
+
+    The projection is used ONLY for visualization. Density-based methods
+    (DBSCAN, HDBSCAN) receive PCA-reduced features as their actual input.
+
+    The result is cached to disk so all CLI steps share the same projection.
+    """
+    cache_path = os.path.join(output_dir, "features_2d.npy")
+
+    if os.path.exists(cache_path):
+        cached = np.load(cache_path)
+        if cached.shape[0] == features.shape[0]:
+            print(f"  [proj] Loading cached 2D projection from {cache_path}")
+            return cached
+        else:
+            print(f"  [proj] Cached projection has {cached.shape[0]} rows but "
+                  f"features have {features.shape[0]} - recomputing.")
+
+    vis = config["visualization"]
+    method = vis.get("method", "umap")
+
+    if method == "umap":
+        try:
+            import umap as umap_lib
+        except ImportError:
+            print("  [proj] umap-learn not installed - falling back to t-SNE.")
+            method = "tsne"
+
+    import time as _time
+
+    if method == "umap":
+        import umap as umap_lib
+        cfg = vis["umap"]
+        reducer = umap_lib.UMAP(
+            n_neighbors  = cfg.get("n_neighbors", 30),
+            n_components = 2,
+            min_dist     = max(cfg.get("min_dist", 0.1), 0.05),
+            metric       = cfg.get("metric", "cosine"),
+            random_state = cfg.get("random_state", 42),
+        )
+        print(f"  [proj] Computing UMAP 2D projection on {features.shape[0]} "
+              f"samples (this may take a few minutes) ...")
+        _t0 = _time.time()
+        f2d = reducer.fit_transform(features)
+        print(f"  [proj] UMAP 2D done in {_time.time() - _t0:.1f}s")
+    else:
+        from sklearn.manifold import TSNE
+        cfg = vis.get("tsne", {})
+        reducer = TSNE(
+            n_components  = 2,
+            perplexity    = cfg.get("perplexity", 40),
+            random_state  = cfg.get("random_state", 42),
+            init          = "pca",
+            learning_rate = "auto",
+        )
+        print(f"  [proj] Computing t-SNE 2D projection on {features.shape[0]} "
+              f"samples (this may take a few minutes) ...")
+        _t0 = _time.time()
+        f2d = reducer.fit_transform(features)
+        print(f"  [proj] t-SNE 2D done in {_time.time() - _t0:.1f}s")
+
+    np.save(cache_path, f2d)
+    print(f"  [proj] Saved to {cache_path}")
+    return f2d

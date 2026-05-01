@@ -1,0 +1,92 @@
+# -------------------------------------------------------
+# Config: CUB-200-2011  —  BioCLIP (ViT-B/16)
+# -------------------------------------------------------
+
+dataset:
+  name: cub200
+  format: cub
+  root: D:\Thesis\Test 1st\CUB_200_2011
+  image_extensions: [jpg, jpeg, png]
+  num_classes: 200
+
+model:
+  name: bioclip
+  pretrained: hf-hub:imageomics/bioclip   # ViT-B/16
+  normalize_embeddings: true
+  batch_size: 64
+  num_workers: 8
+
+  # CUB uses common bird names. BioCLIP was trained on taxonomic text,
+  # so Aves context improves alignment even with common names.
+  prompt_templates:
+    - "{name}"
+    - "a photo of {name}"
+    - "a photo of {name}, a bird"
+    - "a bird of the class Aves, {name}"
+    - "a wildlife photograph of {name}, a bird species"
+
+clustering:
+  methods:
+    - name: kmeans
+      n_clusters: 200
+      n_init: 50
+      random_state: 42
+      max_iter: 500
+
+    - name: agglomerative
+      n_clusters: 200
+      linkage: ward
+
+    - name: spectral
+      n_clusters: 200
+      n_init: 10
+      random_state: 42
+      n_neighbors: 15
+
+    - name: gmm
+      n_clusters: 200
+      covariance_type: diag    # 'full' is infeasible for 512-D embeddings
+      random_state: 42
+      max_iter: 300
+
+    - name: dbscan
+
+    - name: hdbscan
+
+evaluation:
+  top_k_confusions: 20
+
+visualization:
+  method: umap
+  umap:
+    n_neighbors: 30
+    min_dist: 0.1
+    metric: cosine
+    random_state: 42
+  subsample: 5000
+  dpi: 300
+  export_pdf: true
+
+output_dir: results/cub200_bioclip
+seed: 42
+
+# -------------------------------------------------------
+# Dimensionality reduction (dual-path architecture)
+# -------------------------------------------------------
+
+reduction:
+  partition:
+    method: pca
+    n_components: 50
+  density:
+    method: umap
+    n_components: 100
+    n_neighbors: 15
+    min_dist: 0.1
+    metric: cosine
+
+dbscan:
+  min_samples: 10
+
+hdbscan:
+  sweep_range: [10, 15, 20, 25, 30, 35, 40, 45]

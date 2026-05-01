@@ -630,3 +630,83 @@ def plot_per_class_accuracy(per_class_df, config, output_dir, filename):
     plt.tight_layout()
     _save(fig, output_dir, filename, dpi, export_pdf)
     plt.close(fig)
+
+
+# -------------------------------------------------------
+# 8. Per-cluster purity
+# -------------------------------------------------------
+
+def plot_cluster_purity(per_cluster_df, config, output_dir, filename):
+    """
+    Two-panel figure summarising per-cluster purity.
+
+    HOW TO READ THIS FIGURE:
+        Left (histogram):
+            Distribution of purity scores across all clusters.
+            Purity = fraction of images in the cluster that belong to the
+            single most common ground-truth species. A value of 1.0 means
+            the cluster is perfectly homogeneous (one species only).
+            A value near 0 means the cluster mixes many species equally.
+            The red dashed line = mean purity across all clusters.
+
+        Right (worst clusters bar chart):
+            The 20 clusters with the lowest purity, sorted ascending.
+            Each bar shows the purity score; the label shows the cluster ID
+            and its size. Low-purity clusters are candidates for further
+            investigation: they may indicate species that are visually
+            similar enough that the embedding space does not cleanly
+            separate them, or that the cluster count K was too low.
+    """
+    dpi, export_pdf, _ = _vis(config)
+
+    df = per_cluster_df.copy()
+    # exclude noise cluster if present
+    df = df[df["cluster_id"] >= 0].reset_index(drop=True)
+
+    if df.empty:
+        return
+
+    mean_purity = df["purity"].mean()
+    fig, axes = plt.subplots(1, 2, figsize=(15, 6))
+
+    # Left: histogram
+    axes[0].hist(df["purity"], bins=20, color="#4C72B0",
+                 alpha=0.85, edgecolor="white")
+    axes[0].axvline(mean_purity, color="#C44E52", linestyle="--",
+                    linewidth=1.5, label="Mean = {:.3f}".format(mean_purity))
+    axes[0].set_xlabel("Cluster Purity")
+    axes[0].set_ylabel("Number of Clusters")
+    axes[0].set_title("Distribution of Per-Cluster Purity")
+    axes[0].set_xlim(0, 1.0)
+    axes[0].legend()
+
+    # Right: worst clusters bar chart
+    bottom_n = min(20, len(df))
+    worst = df.nsmallest(bottom_n, "purity").reset_index(drop=True)
+    colors = plt.cm.Reds(np.linspace(0.5, 0.9, bottom_n))[::-1]
+
+    labels = [
+        "Cluster {} (n={})".format(int(r["cluster_id"]), int(r["size"]))
+        for _, r in worst.iterrows()
+    ]
+    axes[1].barh(labels, worst["purity"], color=colors, edgecolor="none")
+    axes[1].axvline(mean_purity, color="#C44E52", linestyle="--",
+                    linewidth=1.5, label="Mean = {:.3f}".format(mean_purity))
+    axes[1].set_xlabel("Purity")
+    axes[1].set_title("Bottom {} Clusters by Purity".format(bottom_n))
+    axes[1].set_xlim(0, 1.0)
+    axes[1].invert_yaxis()
+    axes[1].legend(fontsize=8)
+
+    fig.suptitle("Per-Cluster Purity Analysis", y=1.02, fontsize=12)
+    fig.text(
+        0.5, -0.04,
+        "Purity = fraction of images in each cluster belonging to the single "
+        "most common ground-truth species. A perfectly pure cluster contains "
+        "only one species. Low-purity clusters indicate species mixed by the "
+        "clustering algorithm.",
+        ha="center", fontsize=7, color="#555555", style="italic"
+    )
+    plt.tight_layout()
+    _save(fig, output_dir, filename, dpi, export_pdf)
+    plt.close(fig)

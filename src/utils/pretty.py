@@ -29,9 +29,9 @@ def header(title: str, width: int = 68) -> None:
 
 def subheader(title: str, width: int = 68) -> None:
     """Print a lighter sub-section divider."""
-    print(f"\n  {'─' * (width - 4)}")
+    print(f"\n  {'-' * (width - 4)}")
     print(f"  {title}")
-    print(f"  {'─' * (width - 4)}")
+    print(f"  {'-' * (width - 4)}")
 
 
 def step(number: int, total: int, description: str) -> None:
@@ -65,7 +65,7 @@ def metrics_table(rows: list, title: str = "", width: int = 68) -> None:
     """
     if title:
         print(f"\n  {title}")
-        print(f"  {'─' * (width - 4)}")
+        print(f"  {'-' * (width - 4)}")
 
     for row in rows:
         label = row.get("label", "")
@@ -83,7 +83,7 @@ def metrics_table(rows: list, title: str = "", width: int = 68) -> None:
         note_str = f"  {note}" if note else ""
         print(f"    {label:<24s}  {val_str:>10s}{note_str}")
 
-    print(f"  {'─' * (width - 4)}")
+    print(f"  {'-' * (width - 4)}")
 
 
 def comparison_table(methods: list, metrics: dict,
@@ -124,7 +124,7 @@ def comparison_table(methods: list, metrics: dict,
     for metric_label, values in metrics.items():
         row = f"  {metric_label:<22s}"
         for method in methods:
-            val = values.get(method, "—")
+            val = values.get(method, "-")
             if isinstance(val, float):
                 cell = f"{val:.4f}"
             elif isinstance(val, int):

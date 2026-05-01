@@ -17,36 +17,24 @@ model:
   batch_size: 64
   num_workers: 8
 
-  # Prompt templates for text-guided K-Means centroid initialization.
+  # Prompt templates for zero-shot text matching in the annotation step.
   #
-  # WHY THESE SPECIFIC TEMPLATES:
-  #   BioCLIP-2 was trained on TreeOfLife-200M, where each image is paired
-  #   with structured taxonomic text, not image captions. The text encoder
-  #   is therefore most aligned with taxonomic language. Prompts that include
-  #   the order (Lepidoptera) and genus are closer to the model's training
-  #   distribution and produce tighter image-text alignment than generic
-  #   "a photo of X" prompts.
+  # BioCLIP-2 was trained on TreeOfLife-200M with GBIF taxonomic text.
+  # Templates use only taxonomic vocabulary the model has seen during
+  # training: scientific names, genus, family, order.
   #
-  #   Using multiple templates and averaging their embeddings (ensembling)
-  #   gives a more stable centroid estimate than any single prompt alone.
-  #   The averaged embedding is re-normalized to the unit sphere before use.
+  # PLACEHOLDERS (filled from GBIF taxonomy lookup):
+  #   {name}   -> scientific binomial  (e.g. "agrotis exclamationis")
+  #   {genus}  -> genus                (e.g. "agrotis")
+  #   {family} -> family               (e.g. "Noctuidae")
+  #   {order}  -> order                (e.g. "Lepidoptera")
   #
-  # PLACEHOLDERS:
-  #   {name}  -> full scientific name with spaces  (e.g. "abrostola tripartita")
-  #   {genus} -> genus only, first word             (e.g. "abrostola")
-  #
-  # TUNING: if you know the family names for your species, adding a template
-  # like "a moth of the family Noctuidae, {name}" improves alignment further.
-  # Keep to 4-8 templates; returns diminish beyond that.
+  # Templates with unfillable placeholders are silently skipped.
   prompt_templates:
     - "{name}"
-    - "a photo of {name}"
-    - "a photo of {name}, a moth found in Denmark"
-    - "a moth in the order Lepidoptera, {name}"
-    - "a moth in the order noctua, {name}"
-    - "a macro photograph of {name}, a moth"
-    - "{genus} {name}, Lepidoptera"
-    - "{genus} {name}, noctua"
+    - "{name}, family {family}"
+    - "{name}, family {family}, order {order}"
+    - "a species of genus {genus}, family {family}"
 
 clustering:
   methods:
@@ -55,12 +43,6 @@ clustering:
       n_init: 50
       random_state: 42
       max_iter: 500
-
-    - name: kmeans_text_guided
-      n_clusters: 351
-      n_init: 1
-      random_state: 42
-      max_iter: 300
 
     - name: agglomerative
       n_clusters: 351
@@ -75,6 +57,12 @@ clustering:
       # connected" warning and less reliable eigenvectors. 15 is sufficient
       # for ~2000 images with 200 classes (~11 images/class).
       n_neighbors: 15
+
+    - name: gmm
+      n_clusters: 351
+      covariance_type: diag    # 'full' is infeasible for 512-D embeddings
+      random_state: 42
+      max_iter: 300
 
     # DBSCAN: all detailed parameters live in the dbscan: block below.
     # This entry is a routing declaration only — do not add min_samples
@@ -106,18 +94,25 @@ output_dir: results/mothDK
 seed: 42
 
 # -------------------------------------------------------
+# Dimensionality reduction (dual-path architecture)
+# -------------------------------------------------------
+
+reduction:
+  partition:
+    method: pca
+    n_components: 100
+  density:
+    method: umap
+    n_components: 100
+    n_neighbors: 15
+    min_dist: 0.1
+    metric: cosine
+
+# -------------------------------------------------------
 # DBSCAN configuration
-#
-# These parameters are used exclusively by the DBSCANPipeline.
-# Do NOT duplicate them in clustering.methods above — the
-# dedicated block here always wins.
 # -------------------------------------------------------
 
 dbscan:
-  # PCA components before DBSCAN. Do NOT use UMAP output here.
-  # 100 dims retains ~94.8% of variance in BioCLIP-2 embeddings.
-  pca_components: 100
-
   # min_samples: used for both the k-distance plot and DBSCAN itself.
   # Rule of thumb: ln(N) where N ~ 2200 images ~ 7.7; we use 5,
   # which is slightly conservative and allows smaller genuine clusters.
@@ -140,15 +135,23 @@ dbscan:
 # -------------------------------------------------------
 
 hdbscan:
-  pca_components: 100
-
   # Sweep range for min_cluster_size.
-  # For EU-Moth (~11 images/class): 3-15 is a sensible range.
+  # MothSpeciesDK is a long-tailed dataset: many species have only 2-10
+  # images. Small mcs values (2-5) are needed to discover these rare classes.
   sweep_range: [2, 3, 5, 10, 15, 20, 25, 30, 35, 40, 50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150, 160, 170, 180]
+
+  # cluster_selection_method: how HDBSCAN extracts flat clusters from the
+  # condensed tree.
+  #   "eom"  (default): Excess of Mass — merges sub-clusters into stable
+  #                      parent clusters. Better for compact balanced datasets.
+  #   "leaf": extracts the finest-grained leaf nodes. Preserves small clusters
+  #           from rare species instead of merging them. Correct choice for
+  #           long-tailed biological datasets like MothSpeciesDK.
+  cluster_selection_method: leaf
 
   # final_min_cluster_size: override after seeing the sweep.
   # Leave commented to use the sweep result automatically.
-  # final_min_cluster_size: 3
+  # final_min_cluster_size: 5
 
   # min_samples: HDBSCAN core point conservatism.
   # None = defaults to min_cluster_size (recommended).

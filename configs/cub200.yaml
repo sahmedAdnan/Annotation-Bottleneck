@@ -42,12 +42,6 @@ clustering:
       random_state: 42
       max_iter: 500
 
-    - name: kmeans_text_guided
-      n_clusters: 200
-      n_init: 1
-      random_state: 42
-      max_iter: 300
-
     - name: agglomerative
       n_clusters: 200
       linkage: ward
@@ -57,6 +51,12 @@ clustering:
       n_init: 10
       random_state: 42
       n_neighbors: 15
+
+    - name: gmm
+      n_clusters: 200
+      covariance_type: diag    # 'full' is infeasible for 512-D embeddings
+      random_state: 42
+      max_iter: 300
 
     # Parameters for dbscan live in the dbscan: block below.
     - name: dbscan
@@ -82,13 +82,46 @@ output_dir: results/cub200
 seed: 42
 
 # -------------------------------------------------------
+# Dimensionality reduction (dual-path architecture)
+# -------------------------------------------------------
+
+reduction:
+  partition:
+    method: pca
+    n_components: 100
+  density:
+    method: umap
+    n_components: 100
+    n_neighbors: 15
+    min_dist: 0.1
+    metric: cosine
+
+# -------------------------------------------------------
 # Density-based clustering (DBSCAN + HDBSCAN)
 # -------------------------------------------------------
 
 dbscan:
-  pca_components: 100
   min_samples: 10
 
 hdbscan:
-  pca_components: 100
   sweep_range: [10, 15, 20, 25, 30, 35, 40, 45]
+
+# -------------------------------------------------------
+# Annotation Pipeline
+# -------------------------------------------------------
+
+annotation:
+  species_source: dataset
+  taxonomy_source: names       # CUB uses common names, not scientific — GBIF won't match
+
+  uncertainty:
+    review_threshold: 0.55
+    human_threshold: 0.70
+    weights:
+      text_margin: 0.35
+      membership_probability: 0.25
+      cluster_agreement: 0.25
+      taxonomic_consistency: 0.15
+
+  include_sanity_check: true
+  n_sanity: 25

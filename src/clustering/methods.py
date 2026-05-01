@@ -6,14 +6,13 @@ Unified clustering API.
 All methods accept:
   - features:     np.ndarray of shape (N, D)
   - params:       dict from the YAML config block for this method
-  - extra kwargs: optional (e.g. text_centroids for text-guided K-Means)
+  - extra kwargs: optional
 
 All methods return:
   - cluster_ids:  np.ndarray of shape (N,), integer cluster assignments
 
 Supported methods (set via config clustering.methods[].name):
   - kmeans
-  - kmeans_text_guided
   - spectral
   - agglomerative
   - dbscan
@@ -55,45 +54,6 @@ def run_kmeans(features: np.ndarray, params: dict, **kwargs) -> np.ndarray:
 
     return cluster_ids
 
-
-# -------------------------------------------------------
-# Text-Guided K-Means
-# -------------------------------------------------------
-
-def run_kmeans_text_guided(features: np.ndarray, params: dict,
-                            text_centroids: np.ndarray = None,
-                            **kwargs) -> np.ndarray:
-    """
-    K-Means initialized with text embeddings from the model.
-
-    This gives a semantically meaningful starting point for the centroids,
-    which is more stable and typically more accurate than random init.
-
-    The text_centroids array is generated externally (in the cluster CLI)
-    by calling extractor.encode_text(class_names), and passed in here.
-
-    Relevant params:
-        n_clusters, n_init (should be 1), max_iter, random_state
-    """
-    if text_centroids is None:
-        raise ValueError(
-            "text_guided K-Means requires 'text_centroids'. "
-            "Make sure the extractor's encode_text() was called first."
-        )
-
-    km = KMeans(
-        n_clusters   = params["n_clusters"],
-        init         = text_centroids,   # key: text embeddings as start centroids
-        n_init       = params.get("n_init", 1),
-        max_iter     = params.get("max_iter", 300),
-        random_state = params.get("random_state", 42),
-    )
-
-    cluster_ids = km.fit_predict(features)
-    print(f"  [kmeans_text_guided] {params['n_clusters']} clusters, "
-          f"inertia={km.inertia_:.2f}")
-
-    return cluster_ids
 
 
 # -------------------------------------------------------
@@ -250,11 +210,18 @@ def run_gmm(features: np.ndarray, params: dict, **kwargs) -> np.ndarray:
     Gaussian Mixture Model (soft clustering, hard-assigned here).
 
     Relevant params:
-        n_clusters, random_state, covariance_type ('full'|'tied'|'diag'|'spherical')
+        n_clusters:       number of Gaussian components (required)
+        covariance_type:  'full' | 'tied' | 'diag' | 'spherical' (default 'full')
+        reg_covar:        regularization added to covariance diagonal (default 1e-6).
+                          Increase to 1e-3 or 1e-2 if features have collapsed
+                          dimensions (e.g. after UMAP with min_dist=0).
+        random_state:     random seed (default 42)
+        max_iter:         max EM iterations (default 200)
     """
     gmm = GaussianMixture(
         n_components     = params["n_clusters"],
         covariance_type  = params.get("covariance_type", "full"),
+        reg_covar        = params.get("reg_covar", 1e-6),
         random_state     = params.get("random_state", 42),
         max_iter         = params.get("max_iter", 200),
     )
@@ -272,7 +239,6 @@ def run_gmm(features: np.ndarray, params: dict, **kwargs) -> np.ndarray:
 
 METHOD_MAP = {
     "kmeans":             run_kmeans,
-    "kmeans_text_guided": run_kmeans_text_guided,
     "spectral":           run_spectral,
     "agglomerative":      run_agglomerative,
     "dbscan":             run_dbscan,
@@ -290,7 +256,7 @@ def run_clustering(method_name: str, features: np.ndarray,
         method_name: One of the keys in METHOD_MAP.
         features:    Feature array (N, D).
         params:      Hyperparameter dict from config.
-        **kwargs:    Extra args passed to the method (e.g. text_centroids).
+        **kwargs:    Extra args passed to the method.
 
     Returns:
         cluster_ids: Integer array (N,).

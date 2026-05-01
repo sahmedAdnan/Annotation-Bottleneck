@@ -1,0 +1,145 @@
+# -------------------------------------------------------
+# Config: MothDK Subsampled (balanced, comparable to EU-Moth)
+#
+# Randomly selects 190 classes with >= 11 images each,
+# then samples exactly 11 images per class -> 2090 total.
+# -------------------------------------------------------
+
+dataset:
+  name: mothDK_subsample
+  format: imagefolder
+  root: D:\Thesis\Test 1st\MothSpeciesDK\MothSpeciesDK
+  image_extensions: [jpg, jpeg, png]
+  num_classes: 200
+
+  subsample:
+    enabled: true
+    n_classes: 200
+    images_per_class: 10       # set to -1 to keep all images (uncapped)
+    min_images_per_class: 7   # exclude classes with fewer than this
+    random_seed: 42
+
+model:
+  name: bioclip2
+  pretrained: hf-hub:imageomics/bioclip-2
+  normalize_embeddings: true
+  batch_size: 64
+  num_workers: 8
+
+  prompt_templates:
+    - "{name}"
+    - "{name}, family {family}"
+    - "{name}, family {family}, order {order}"
+    - "a species of genus {genus}, family {family}"
+
+clustering:
+  methods:
+    - name: kmeans
+      n_clusters: 200
+      n_init: 50
+      random_state: 42
+      max_iter: 500
+
+    - name: agglomerative
+      n_clusters: 200
+      linkage: ward
+
+    - name: spectral
+      n_clusters: 200
+      n_init: 10
+      random_state: 42
+      n_neighbors: 15
+
+    - name: gmm
+      n_clusters: 200
+      covariance_type: diag
+      random_state: 42
+      max_iter: 300
+
+    - name: dbscan
+
+    - name: hdbscan
+
+evaluation:
+  top_k_confusions: 20
+
+visualization:
+  method: umap
+  umap:
+    n_neighbors: 30
+    min_dist: 0.1
+    metric: cosine
+    random_state: 42
+  tsne:
+    perplexity: 40
+    random_state: 42
+  subsample: 5000
+  dpi: 300
+  export_pdf: true
+
+output_dir: results/mothDK_subsample
+seed: 42
+
+# -------------------------------------------------------
+# Dimensionality reduction (dual-path architecture)
+# -------------------------------------------------------
+
+reduction:
+  partition:
+    method: pca
+    n_components: 100
+  density:
+    method: umap
+    n_components: 100
+    n_neighbors: 15
+    min_dist: 0.1
+    metric: cosine
+
+# -------------------------------------------------------
+# DBSCAN configuration
+# -------------------------------------------------------
+
+dbscan:
+  min_samples: 5
+
+# -------------------------------------------------------
+# HDBSCAN configuration
+# -------------------------------------------------------
+
+hdbscan:
+  sweep_range: [2, 3, 5, 7]
+  cluster_selection_method: leaf
+
+# -------------------------------------------------------
+# Annotation Pipeline
+# -------------------------------------------------------
+
+annotation:
+  # Species list source: "dataset" | "file" | "gbif"
+  species_source: dataset
+
+  # Pre-computed taxonomy CSV (overrides taxonomy_source if file exists)
+  taxonomy_file: mothDK_classes_with_family.csv
+
+  # GBIF query settings (used if species_source=gbif or taxonomy lookup)
+  gbif:
+    taxon_key: 797            # Lepidoptera
+    kingdom: Animalia
+    continent: EUROPE
+    country: DK
+    limit: 500
+    cache_dir: .cache/gbif
+
+  # Uncertainty configuration
+  uncertainty:
+    review_threshold: 0.55      # combined >= 0.55 -> "review"
+    human_threshold: 0.70       # combined >= 0.70 -> "human_required"
+    weights:
+      text_margin: 0.35
+      membership_probability: 0.25
+      cluster_agreement: 0.25
+      taxonomic_consistency: 0.15
+
+  # Review export settings
+  include_sanity_check: true
+  n_sanity: 25

@@ -3,30 +3,27 @@ src/clustering/density/dbscan_pipeline.py
 ------------------------------------------
 Full DBSCAN diagnostic, tuning, and evaluation pipeline.
 
-Addresses the following issues found in the original notebook:
+Feature space:
+    By default, the pipeline receives UMAP-100D pre-reduced features from
+    the caller (cli/cluster.py or cli/density.py).  This was validated on
+    EU-Moth (ARI=0.9798) and CUB-200 (ARI=0.8455): UMAP preserves the
+    local neighborhood structure that DBSCAN depends on for density
+    estimation, while removing high-dimensional noise.
 
-  1. DBSCAN was run on UMAP-50D with min_dist=0.0, which distorts the
-     density structure DBSCAN depends on. This module justifies and
-     implements the correct feature space choice (PCA-reduced).
+    If no pre-reduced features are provided, the pipeline falls back to
+    internal PCA reduction (legacy behavior).
 
-  2. ARI was computed with noise points (label=-1) included, which
-     creates a phantom cluster and severely under-reports true quality.
-     All metrics here exclude noise before evaluation.
-
-  3. The eps range was arbitrary (no k-distance plot). This module
-     generates the k-distance plot first, then uses it to guide the sweep.
-
-  4. File discovery was non-deterministic (no sort). This module expects
-     sorted inputs from the caller (enforced in the runner script).
-
-  5. Visualizations had legend=False, double reduction, and no sweep plots.
-     All figures here are publication-quality with proper labels and captions.
+Noise handling:
+    All metrics (ARI, NMI, accuracy) exclude noise points (label=-1).
+    Coverage-weighted ARI = ARI × (1 - noise_pct) is used for eps selection.
 
 Usage:
     from src.clustering.density.dbscan_pipeline import DBSCANPipeline
     pipeline = DBSCANPipeline(config)
     results  = pipeline.run(features, true_label_ids, class_names,
-                            features_2d, output_dir)
+                            features_2d, output_dir,
+                            features_reduced=umap_features,
+                            reduction_label="UMAP-100D")
 """
 
 import os
@@ -50,9 +47,7 @@ from typing                import List, Optional, Tuple
 
 matplotlib.use("Agg")
 
-# Pull in the shared evaluation helpers from the existing project
-import sys
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", ".."))
+# Pull in the shared evaluation helpers (relative import within src package)
 from src.evaluation.metrics import hungarian_accuracy, per_class_accuracy, top_k_confusion_pairs
 
 
@@ -105,26 +100,12 @@ def _save(fig: plt.Figure, output_dir: str, stem: str,
 def prepare_features(features: np.ndarray,
                      n_pca_components: int = 100) -> Tuple[np.ndarray, object]:
     """
-    Reduce features with PCA before running DBSCAN.
+    Reduce features with PCA (legacy fallback).
 
-    WHY PCA INSTEAD OF UMAP FOR DBSCAN:
-        DBSCAN is a distance-based algorithm. It assumes that the density
-        structure (the distribution of pairwise distances) in the input space
-        is meaningful and consistent across the whole dataset.
-
-        UMAP with min_dist=0.0 deliberately compresses points within each local
-        neighborhood into tight balls separated by empty space. This creates
-        an artificial density structure: DBSCAN finds the UMAP artifacts, not
-        real biological clusters.
-
-        PCA is a linear projection that preserves global Euclidean distance
-        structure. It removes noise dimensions (the last principal components
-        typically contain noise) without inventing new density artifacts.
-        50-100 PCA dimensions retain > 90% of variance in BioCLIP embeddings
-        and give DBSCAN a clean, distance-honest space to work in.
-
-        UMAP can still be used for 2D *visualization*, but it should never be
-        the input space for distance-based algorithms like DBSCAN.
+    NOTE: The main pipeline now uses UMAP-100D for density methods
+    (computed externally in src/reduction/ and passed via
+    features_reduced). This function is retained as a fallback for
+    standalone use and backward compatibility with experiment scripts.
 
     Args:
         features:         Raw (L2-normalized) feature array, shape (N, D).
@@ -240,7 +221,8 @@ def plot_kdistance(features: np.ndarray, min_samples: int,
 
 def eps_sweep(features: np.ndarray, true_label_ids: np.ndarray,
               eps_values: np.ndarray, min_samples: int,
-              output_dir: str, export_pdf: bool = False) -> pd.DataFrame:
+              output_dir: str, export_pdf: bool = False,
+              n_true_classes: int = None) -> pd.DataFrame:
     """
     Sweep over eps values and record: ARI, NMI, % noise, # clusters.
 
@@ -268,7 +250,7 @@ def eps_sweep(features: np.ndarray, true_label_ids: np.ndarray,
 
     rows = []
 
-    for eps in eps_values:
+    for j, eps in enumerate(eps_values, 1):
         db     = DBSCAN(eps=eps, min_samples=min_samples, metric="euclidean",
                         n_jobs=-1)
         labels = db.fit_predict(features)
@@ -299,6 +281,10 @@ def eps_sweep(features: np.ndarray, true_label_ids: np.ndarray,
         #   ARI=0.97 with 2% noise  ->  score = 0.97 * 0.98 = 0.95 (good)
         coverage       = 1.0 - noise_pct
         weighted_score = ari * coverage
+
+        print(f"    [{j:2d}/{len(eps_values)}] eps={eps:.4f} -> "
+              f"clusters={n_clusters:4d}, noise={noise_pct:.1%}, "
+              f"ARI={ari:.4f}, score={weighted_score:.4f}")
 
         rows.append(dict(eps=eps, n_clusters=n_clusters,
                          noise_pct=noise_pct, ari=ari, nmi=nmi,
@@ -343,8 +329,9 @@ def eps_sweep(features: np.ndarray, true_label_ids: np.ndarray,
     # Panel 3: # clusters vs eps
     axes[2].plot(df["eps"], df["n_clusters"], color="#8172B2",
                  linewidth=2, marker="^", markersize=4)
-    axes[2].axhline(y=200, color="#FF7F0E", linestyle="--", linewidth=1.5,
-                    label="True # classes (200)")
+    _true_k = n_true_classes if n_true_classes is not None else 200
+    axes[2].axhline(y=_true_k, color="#FF7F0E", linestyle="--", linewidth=1.5,
+                    label=f"True # classes ({_true_k})")
     axes[2].axvline(best_eps_val, color="#C44E52", linestyle="--", linewidth=1.5)
     axes[2].set_xlabel("eps")
     axes[2].set_ylabel("Clusters Found")
@@ -400,11 +387,14 @@ def fit_and_evaluate(features: np.ndarray, true_label_ids: np.ndarray,
 
     Returns a dict with all results.
     """
-    print(f"\n  [dbscan] Fitting: eps={eps:.4f}, min_samples={min_samples}")
+    import time as _time
+    print(f"\n  [dbscan] Final fit: eps={eps:.4f}, min_samples={min_samples} ...")
+    _t0 = _time.time()
 
     db     = DBSCAN(eps=eps, min_samples=min_samples, metric="euclidean",
                     n_jobs=-1)
     labels = db.fit_predict(features)
+    print(f"  [dbscan] Fit completed in {_time.time() - _t0:.1f}s")
 
     n_total    = len(labels)
     n_noise    = int((labels == -1).sum())
@@ -680,16 +670,23 @@ class DBSCANPipeline:
 
     def run(self, features: np.ndarray, true_label_ids: np.ndarray,
             class_names: List[str], features_2d: np.ndarray,
-            output_dir: str) -> dict:
+            output_dir: str,
+            features_reduced: np.ndarray = None,
+            reduction_label: str = None) -> dict:
         """
         Run the full pipeline.
 
         Args:
-            features:       Raw L2-normalized embeddings, shape (N, D).
-            true_label_ids: Integer class IDs, shape (N,).
-            class_names:    Ordered list of class name strings.
-            features_2d:    Pre-computed 2D UMAP projection for visualization.
-            output_dir:     Where to save all outputs.
+            features:         Raw L2-normalized embeddings, shape (N, D).
+            true_label_ids:   Integer class IDs, shape (N,).
+            class_names:      Ordered list of class name strings.
+            features_2d:      Pre-computed 2D UMAP projection for visualization.
+            output_dir:       Where to save all outputs.
+            features_reduced: Pre-reduced features (e.g. UMAP-100D from
+                              src/reduction/). If provided, skips internal
+                              PCA reduction.
+            reduction_label:  Human-readable label for the reduction used
+                              (e.g. "UMAP-100D"). Shown in logs.
 
         Returns:
             Dict with all results and metrics.
@@ -703,9 +700,15 @@ class DBSCANPipeline:
         print("DBSCAN PIPELINE")
         print("=" * 60)
 
-        # Step 0: PCA reduction
-        print("\n[Step 0] Feature space preparation (PCA) ...")
-        features_pca, pca = prepare_features(features, self.n_pca)
+        # Step 0: Feature space preparation
+        if features_reduced is not None:
+            label = reduction_label or f"external-{features_reduced.shape[1]}D"
+            print(f"\n[Step 0] Using pre-reduced features: {label} "
+                  f"({features_reduced.shape[1]}D)")
+            features_pca = features_reduced
+        else:
+            print("\n[Step 0] Feature space preparation (PCA fallback) ...")
+            features_pca, pca = prepare_features(features, self.n_pca)
 
         # Step 1: k-distance plot
         print("\n[Step 1] k-distance plot ...")
@@ -729,7 +732,8 @@ class DBSCANPipeline:
         sweep_df = eps_sweep(
             features_pca, true_label_ids,
             eps_values, self.min_samples,
-            fig_dir, self.export_pdf
+            fig_dir, self.export_pdf,
+            n_true_classes=len(class_names),
         )
 
         # Step 3: Choose best eps using coverage-weighted ARI
@@ -761,8 +765,12 @@ class DBSCANPipeline:
             eps=final_eps, min_samples=self.min_samples,
             top_k=self.config.get("evaluation", {}).get("top_k_confusions", 20),
         )
-        results["pca_components"] = self.n_pca
-        results["knee_eps"]       = knee_eps
+        if features_reduced is not None:
+            results["reduction"] = reduction_label or "external"
+        else:
+            results["reduction"] = f"PCA-{self.n_pca}D"
+            results["pca_components"] = self.n_pca
+        results["knee_eps"] = knee_eps
 
         # Step 5: Publication figures
         print("\n[Step 5] Generating publication figures ...")
