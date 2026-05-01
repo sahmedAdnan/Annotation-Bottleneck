@@ -1,7 +1,11 @@
-# BioCLIP Clustering Pipeline
+# BioCLIP Clustering and Annotation Pipeline
 
-A modular, reproducible pipeline for extracting image embeddings with BioCLIP-2
-and clustering them across biological image datasets (EU-Moth, MothSpeciesDK, CUB-200-2011, and others).
+A modular, reproducible pipeline for unsupervised species identification from biological images. The pipeline extracts BioCLIP-2 image embeddings, clusters them with one of six unsupervised algorithms, and assigns species names to clusters via zero-shot text matching with a four-signal uncertainty quantification framework.
+
+The pipeline supports two workflows:
+
+1. **Labelled benchmark evaluation** — measure clustering and annotation accuracy on datasets with ground-truth species labels (EU-Moth, CUB-200-2011, MothSpeciesDK).
+2. **Unlabelled specimen identification** — annotate unknown specimen images with confidence-tiered species labels and produce an interactive HTML review report for expert verification.
 
 ---
 
@@ -9,44 +13,32 @@ and clustering them across biological image datasets (EU-Moth, MothSpeciesDK, CU
 
 ```
 bioclip_clustering/
-├── configs/                 # YAML configs per dataset/run
-│   ├── eumoth.yaml          # EU-Moth (200 species)
-│   ├── cub200.yaml          # CUB-200-2011 (200 bird species)
-│   └── mothDK.yaml          # MothSpeciesDK (351 Danish moth species)
+├── configs/                    # YAML configs per dataset / model
 ├── src/
-│   ├── data/                # Dataset loading and image discovery
-│   │   ├── dataset.py       # ImageFolder + CUB loaders, corrupted-image filter
-│   │   └── plugins.py       # Plugin registry for custom formats (iNaturalist example included)
-│   ├── models/              # Embedding extractors (BioCLIP-2, CLIP, DINOv2)
-│   ├── clustering/          # KMeans, Text-Guided KMeans, Spectral, Agglomerative, DBSCAN, HDBSCAN, GMM
-│   │   └── density/         # Full DBSCAN and HDBSCAN diagnostic pipelines
-│   ├── evaluation/          # ARI, NMI, Hungarian accuracy, confusion analysis
-│   ├── visualization/       # Publication-ready plots (300 DPI PNG + PDF)
-│   ├── diagnostics/         # 1-NN accuracy, silhouette, feature quality report
-│   └── utils/
-│       ├── io.py            # NPZ save/load, seed control, config loading
-│       └── pretty.py        # Console formatting helpers
-├── cli/                     # CLI entry points (one per pipeline stage)
-│   ├── extract.py           # Stage 1: extract embeddings
-│   ├── cluster.py           # Stage 2: all clustering methods
-│   ├── evaluate.py          # Stage 3: metrics + publication figures
-│   ├── diagnose.py          # Stage 4: diagnostic report
-│   └── density.py           # Standalone: DBSCAN + HDBSCAN only
+│   ├── data/                   # Dataset loading, subsampling, image discovery
+│   ├── models/                 # Embedding extractors (BioCLIP-2, BioCLIP, CLIP, DINOv2)
+│   ├── reduction/              # PCA, UMAP, dual-path reduction
+│   ├── clustering/             # K-Means, Spectral, Agglomerative, GMM, DBSCAN, HDBSCAN
+│   │   └── density/            # DBSCAN and HDBSCAN diagnostic pipelines
+│   ├── evaluation/             # ARI, NMI, Hungarian accuracy, confusion analysis
+│   ├── visualization/          # Publication-ready plots (300 DPI PNG + PDF)
+│   ├── annotation/             # Centroid annotation, 4-signal uncertainty, expert review
+│   └── utils/                  # I/O, seed control, console formatting
+├── cli/
+│   ├── extract.py              # Stage 1: extract embeddings
+│   ├── cluster.py              # Stage 2: run clustering
+│   ├── evaluate.py             # Stage 3: metrics + figures
+│   ├── annotate.py             # Stage 4: zero-shot annotation + uncertainty + review
+│   ├── compare_models.py       # Compare BioCLIP-2 vs BioCLIP vs CLIP vs DINOv2
+│   └── reduction_analysis.py   # Compare PCA / UMAP / PCA+UMAP at multiple dimensions
 ├── experiments/
-│   ├── run_pipeline.py      # End-to-end runner (all 4 stages)
-│   └── run_density_clustering.py  # Backwards-compatible wrapper for cli/density.py
-└── results/                 # Auto-created; not committed to git
-    └── <dataset>/
-        ├── features.npz
-        ├── features_2d.npy          # Cached 2D UMAP/t-SNE projection
-        ├── clusters_<method>.npz
-        ├── metrics.json
-        ├── metrics_summary.csv
-        ├── density_metrics_combined.json
-        ├── density_metrics_summary.csv
-        ├── diagnostics_report.txt
-        └── figures/
-            └── *.png / *.pdf
+│   ├── run_pipeline.py         # End-to-end runner: extract -> cluster -> evaluate
+│   └── unlabeled_pipeline/     # Real-world annotation for unknown specimens
+│       ├── run_unlabeled.py    # GBIF / local / CSV candidate modes + HTML report
+│       ├── gbif_candidates.py  # GBIF API queries with balanced per-family coverage
+│       ├── species_report.py   # Interactive HTML report generator
+│       └── config_example.yaml
+└── results/                    # Auto-created (not committed)
 ```
 
 ---
@@ -57,7 +49,8 @@ bioclip_clustering/
 
 ```bash
 python3 -m venv venv
-source venv/bin/activate
+source venv/bin/activate          # Linux / macOS
+venv\Scripts\activate             # Windows
 ```
 
 ### 2. Install dependencies
@@ -66,114 +59,73 @@ source venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### 3. Optional extras
+### 3. Configure dataset paths
 
-```bash
-# For UMAP (recommended; t-SNE used as fallback if not installed)
-pip install umap-learn
-
-# For HDBSCAN
-pip install hdbscan
-
-# For DINOv2
-pip install timm torchvision
-```
+Edit the YAML config for your dataset under `configs/` and set the `images_dir` (or `dataset.root`) field to the absolute path on your machine. The shipped configs use placeholder paths that must be replaced before running.
 
 ---
 
 ## Usage
 
-All CLI commands take a config file as the first argument.
-Results are written to the path defined in your config under `output_dir`.
+All CLI commands take a YAML config as their argument. Outputs are written to the `output_dir` defined in the config.
 
-### Step 1 — Extract features
-
-```bash
-python cli/extract.py --config configs/eumoth.yaml
-```
-
-Outputs:
-- `results/eumoth/features.npz` (embeddings + labels + paths)
-- `results/eumoth/features_2d.npy` (cached 2D projection, computed on first use)
-
-### Step 2 — Cluster
+### Workflow 1: Labelled benchmark evaluation
 
 ```bash
-python cli/cluster.py --config configs/eumoth.yaml
-```
+# End-to-end: extract -> cluster -> evaluate
+python experiments/run_pipeline.py --config configs/eumoth.yaml
 
-Outputs:
-- `results/eumoth/clusters_kmeans.npz`
-- `results/eumoth/clusters_kmeans_text_guided.npz`
-- `results/eumoth/clusters_agglomerative.npz`
-- `results/eumoth/clusters_spectral.npz`
-- `results/eumoth/clusters_dbscan.npz`
-- `results/eumoth/clusters_hdbscan.npz`
-- `results/eumoth/dbscan_metrics.json`, `dbscan_sweep.csv`
-- `results/eumoth/hdbscan_metrics.json`, `hdbscan_sweep.csv`
-- `results/eumoth/density_metrics_combined.json`, `density_metrics_summary.csv`
-- `results/eumoth/figures/dbscan_*.png`, `hdbscan_*.png`
-
-### Step 3 — Evaluate and plot
-
-```bash
+# Or run stages individually
+python cli/extract.py  --config configs/eumoth.yaml
+python cli/cluster.py  --config configs/eumoth.yaml
 python cli/evaluate.py --config configs/eumoth.yaml
 ```
 
-Outputs:
-- `results/eumoth/metrics.json`
-- `results/eumoth/metrics_summary.csv`
-- `results/eumoth/figures/*.png`
-
-### Step 4 — Diagnostics report
+### Workflow 2: Annotate clusters with species names
 
 ```bash
-python cli/diagnose.py --config configs/eumoth.yaml
+# Annotate a specific clustering method
+python cli/annotate.py --config configs/eumoth.yaml --method hdbscan
+
+# After expert fills out the review CSV, merge corrections back
+python cli/annotate.py --config configs/eumoth.yaml \
+    --merge results/eumoth/review_template_filled.csv
 ```
 
-Outputs:
-- `results/eumoth/diagnostics_report.txt` (1-NN accuracy, silhouette, feature stats, quick K-Means)
-- `results/eumoth/figures/diagnostic_overview.png`
-
-### Run everything at once
+### Workflow 3: Annotate unknown specimens
 
 ```bash
-python experiments/run_pipeline.py --config configs/eumoth.yaml
+# GBIF mode (queries GBIF for candidate species in the region)
+python experiments/unlabeled_pipeline/run_unlabeled.py \
+    --config experiments/unlabeled_pipeline/config_example.yaml
+
+# Local mode (uses dataset folder names as candidates, no internet needed)
+python experiments/unlabeled_pipeline/run_unlabeled.py \
+    --config experiments/unlabeled_pipeline/config_example.yaml --local
+
+# CSV mode (uses pre-computed taxonomy file as candidate list)
+python experiments/unlabeled_pipeline/run_unlabeled.py \
+    --config experiments/unlabeled_pipeline/config_example.yaml \
+    --taxonomy path/to/taxonomy.csv
 ```
 
-#### Skip flags (for resuming or partial runs)
+The unlabelled pipeline produces an interactive HTML report (`species_report.html`) where each cluster can be reviewed and either accepted, corrected, or rejected by an expert.
+
+### Workflow 4: Compare foundation models
 
 ```bash
-# Resume from clustering (features already extracted)
-python experiments/run_pipeline.py --config configs/eumoth.yaml --skip-extract
-
-# Skip only HDBSCAN (if not installed)
-python experiments/run_pipeline.py --config configs/eumoth.yaml --skip-hdbscan
-
-# Skip both density methods (DBSCAN + HDBSCAN)
-python experiments/run_pipeline.py --config configs/eumoth.yaml --skip-density
-
-# Re-run only evaluation figures
-python experiments/run_pipeline.py --config configs/eumoth.yaml \
-    --skip-extract --skip-cluster --skip-diagnose
-
-# Available skip flags:
-#   --skip-extract    Skip Step 1 (feature extraction)
-#   --skip-cluster    Skip Step 2 (all clustering)
-#   --skip-evaluate   Skip Step 3 (evaluation + figures)
-#   --skip-diagnose   Skip Step 4 (diagnostics)
-#   --skip-density    Skip DBSCAN + HDBSCAN within Step 2
-#   --skip-dbscan     Skip DBSCAN only within Step 2
-#   --skip-hdbscan    Skip HDBSCAN only within Step 2
+python cli/compare_models.py --config configs/eumoth.yaml
 ```
 
-### Run density clustering standalone
+Runs all clustering methods on BioCLIP-2, BioCLIP, CLIP, and DINOv2 embeddings and reports comparative metrics with heatmaps.
+
+### Workflow 5: Find optimal dimensionality reduction
 
 ```bash
-python cli/density.py --config configs/eumoth.yaml
-python cli/density.py --config configs/eumoth.yaml --skip-hdbscan
-python cli/density.py --config configs/eumoth.yaml --skip-dbscan
+python cli/reduction_analysis.py --config configs/eumoth.yaml
 ```
+
+Compares Full-D, PCA, UMAP, and PCA+UMAP at multiple target dimensions for each clustering method.
 
 ---
 
@@ -181,24 +133,23 @@ python cli/density.py --config configs/eumoth.yaml --skip-dbscan
 
 | Dataset | Classes | Images | Format | Config |
 |---------|---------|--------|--------|--------|
-| EU-Moth | 200 European moth species | ~2,200 | `imagefolder` | `eumoth.yaml` |
-| MothSpeciesDK | 351 Danish moth species | 18,999 | `imagefolder` | `mothDK.yaml` |
-| CUB-200-2011 | 200 bird species | ~11,788 | CUB metadata | `cub200.yaml` |
+| EU-Moth | 200 European moth species | 2,205 | `imagefolder` | `configs/eumoth.yaml` |
+| CUB-200-2011 | 200 bird species | 11,788 | `imagefolder` | `configs/cub200.yaml` |
+| MothSpeciesDK (full) | 351 Danish moth species | 18,999 | `imagefolder` | `configs/mothDK.yaml` |
+| MothSpeciesDK (subsample) | 200 species, balanced | 1,961 | `imagefolder` | `configs/mothDK_subsample.yaml` |
 
 ---
 
-## Models Supported
+## Foundation Models Supported
 
-| `model.name` | Architecture | Embedding Dim | Pretrained On |
-|---|---|---|---|
-| `bioclip2` | ViT-L/14 | 768 | TreeOfLife-200M (biology) |
-| `bioclip` | ViT-B/16 | 512 | TreeOfLife-10M (biology) |
-| `clip` | ViT-L/14 | 768 | LAION-2B (general) |
-| `dinov2` | ViT-L/14 | 1024 | LVD-142M (self-supervised) |
+| `model.name` | Architecture | Embedding Dim | Pretrained On | Text Encoder |
+|---|---|---|---|---|
+| `bioclip2` | ViT-L/14 | 768 | TreeOfLife-200M | Yes |
+| `bioclip` | ViT-B/16 | 512 | TreeOfLife-10M | Yes |
+| `clip` | ViT-L/14 | 768 | LAION-400M | Yes |
+| `dinov2` | ViT-L/14 | 1,024 | LVD-142M | No |
 
-Switch models by changing `model.name` and `model.pretrained` in the YAML config. No code changes needed.
-
-> **Note:** `kmeans_text_guided` requires a CLIP-family model (BioCLIP-2, BioCLIP, or CLIP). DINOv2 has no text encoder and is incompatible with that clustering method.
+Switch models by changing `model.name` and `model.pretrained` in the YAML config. DINOv2 has no text encoder and cannot be used with the annotation pipeline.
 
 ---
 
@@ -206,29 +157,43 @@ Switch models by changing `model.name` and `model.pretrained` in the YAML config
 
 | Method | Requires K | Notes |
 |--------|-----------|-------|
-| `kmeans` | Yes | Baseline; 50 random restarts |
-| `kmeans_text_guided` | Yes | Text centroid init via BioCLIP-2 text encoder; prompt template ensembling |
-| `spectral` | Yes | Nearest-neighbor affinity; O(N²) memory — not recommended for N > 5,000 |
+| `kmeans` | Yes | 50 random restarts, 500 max iterations |
 | `agglomerative` | Yes | Ward linkage |
-| `dbscan` | No | Auto eps via k-distance knee; PCA pre-processing |
-| `hdbscan` | No | Auto min_cluster_size sweep; min_cluster_size must be ≥ 2 |
-| `gmm` | Yes | Gaussian Mixture Model; hard-assigned at evaluation |
+| `spectral` | Yes | Nearest-neighbour affinity; O(N²) memory |
+| `gmm` | Yes | Diagonal covariance |
+| `dbscan` | No | Auto `eps` via k-distance knee method |
+| `hdbscan` | No | Sweep over `min_cluster_size`; `eom` or `leaf` selection |
+
+Fixed-k methods are reduced with PCA (preserves global variance for Euclidean distances). Density-based methods are reduced with UMAP (preserves local neighbourhood structure for density estimation). This dual-path reduction is configured in each YAML file.
 
 ---
 
-## Adding a New Dataset
+## Annotation Pipeline
 
-1. Create a new config file under `configs/` (copy `eumoth.yaml` as a template).
-2. If your dataset uses a non-standard folder structure, add a loader plugin in
-   `src/data/plugins.py` following the existing iNaturalist example (`@register_plugin("inaturalist")`).
-3. Run the pipeline as above.
+The annotation stage assigns a species name to each cluster via zero-shot text matching in the original 768-dimensional CLIP space, and quantifies prediction uncertainty with four independent signals:
+
+| Signal | Captures | Weight |
+|---|---|---|
+| Semantic (text margin) | Similar-looking species pairs | 0.35 |
+| Spatial (membership probability) | Boundary or noise points | 0.25 |
+| Cluster agreement | Misplaced images in good clusters | 0.25 |
+| Taxonomic consistency | Clusters mixing different families | 0.15 |
+
+The combined uncertainty score classifies each annotation into one of three confidence tiers:
+
+- **`auto_accept`** — combined uncertainty below the review threshold (default 0.55)
+- **`review`** — between review and human-required thresholds
+- **`human_required`** — combined uncertainty above the human-required threshold (default 0.70)
+
+A review CSV is exported for the `review` and `human_required` tiers. Expert corrections can be merged back with full provenance tracking.
 
 ---
 
-## Reproducing Results
+## Reproducibility
 
-Seeds are set globally at the start of every CLI command.
-For deterministic GPU behavior, set:
+A fixed random seed (42) is set globally at the start of every pipeline run, controlling Python's `random`, NumPy, and PyTorch generators. All hyperparameters are specified in YAML configuration files; no values are hardcoded in the source code.
+
+For deterministic GPU behaviour, set:
 
 ```bash
 # Linux / macOS
@@ -236,12 +201,7 @@ export CUBLAS_WORKSPACE_CONFIG=:4096:8
 
 # Windows PowerShell
 $env:CUBLAS_WORKSPACE_CONFIG=":4096:8"
-
-# Windows Command Prompt
-set CUBLAS_WORKSPACE_CONFIG=:4096:8
 ```
-
-Then run as usual.
 
 ---
 
@@ -251,32 +211,25 @@ Then run as usual.
 - PyTorch 2.x
 - open_clip_torch
 - scikit-learn
-- matplotlib, seaborn
-- pandas, numpy, scipy
-- tqdm, PyYAML, Pillow
-- umap-learn (optional, recommended)
-- hdbscan (optional)
-- timm, torchvision (optional, for DINOv2)
+- hdbscan
+- umap-learn
+- timm (for DINOv2)
+- matplotlib, pandas, numpy, scipy, tqdm, PyYAML, Pillow
+
+See `requirements.txt` for the exact pinned versions used in all reported experiments.
 
 ---
 
-## Methodology
+## Citation
 
-Image embeddings were extracted using BioCLIP-2 (ViT-L/14), a vision-language foundation
-model pre-trained on biological image-text pairs. Each image was resized and normalized
-according to the model's preprocessing transform, then encoded with the frozen image encoder.
-The resulting 768-dimensional embeddings were L2-normalized prior to clustering, so that
-Euclidean distance in embedding space is equivalent to cosine distance.
+If you use this pipeline in your research, please cite the underlying foundation models:
 
-Clustering was performed with multiple algorithms: K-Means, Text-Guided K-Means, Spectral
-Clustering, Agglomerative (Ward linkage), DBSCAN, HDBSCAN, and GMM. For K-anchored methods
-the number of clusters was set equal to the number of known species. Cluster quality was
-measured with Adjusted Rand Index (ARI) and Normalized Mutual Information (NMI), which are
-both robust to class imbalance and invariant to cluster label permutation. Cluster-to-class
-assignment accuracy was computed via the Hungarian algorithm. For density methods (DBSCAN,
-HDBSCAN), a coverage-weighted ARI (ARI × coverage fraction) is used as the primary verdict
-metric to account for noise rejection. Embeddings were projected to 2D for visualization
-using UMAP with cosine metric (t-SNE used as fallback if umap-learn is not installed).
+- **BioCLIP-2**: Stevens et al., *BioCLIP: A Vision Foundation Model for the Tree of Life*, CVPR 2024.
+- **CLIP**: Radford et al., *Learning Transferable Visual Models From Natural Language Supervision*, ICML 2021.
+- **DINOv2**: Oquab et al., *DINOv2: Learning Robust Visual Features without Supervision*, TMLR 2024.
 
-All experiments were run with a fixed random seed (42) for reproducibility.
-Figures were generated at 300 DPI and exported as PNG and PDF.
+And the benchmark datasets used:
+
+- **EU-Moth**: Korsch et al., *Deep Learning Pipeline for Automated Visual Moth Monitoring*, INFORMATIK 2021.
+- **CUB-200-2011**: Wah et al., Caltech-UCSD Birds-200-2011 Dataset, Tech. Report CNS-TR-2011-001, 2011.
+- **MothSpeciesDK**: Bjerge et al., *An Automated Light Trap to Monitor Moths Using Computer Vision-Based Tracking and Deep Learning*, Sensors 21(2), 2021.
