@@ -209,28 +209,52 @@ def run_gmm(features: np.ndarray, params: dict, **kwargs) -> np.ndarray:
     """
     Gaussian Mixture Model (soft clustering, hard-assigned here).
 
+    Automatically retries with increasing reg_covar if the covariance matrix
+    becomes ill-conditioned (common on UMAP-reduced features where some
+    components may have very few or collapsed points).
+
     Relevant params:
         n_clusters:       number of Gaussian components (required)
         covariance_type:  'full' | 'tied' | 'diag' | 'spherical' (default 'full')
         reg_covar:        regularization added to covariance diagonal (default 1e-6).
-                          Increase to 1e-3 or 1e-2 if features have collapsed
-                          dimensions (e.g. after UMAP with min_dist=0).
+                          Auto-escalated to 1e-4 -> 1e-3 -> 1e-2 -> 1e-1 on failure.
         random_state:     random seed (default 42)
         max_iter:         max EM iterations (default 200)
     """
-    gmm = GaussianMixture(
-        n_components     = params["n_clusters"],
-        covariance_type  = params.get("covariance_type", "full"),
-        reg_covar        = params.get("reg_covar", 1e-6),
-        random_state     = params.get("random_state", 42),
-        max_iter         = params.get("max_iter", 200),
+    base_reg     = params.get("reg_covar", 1e-6)
+    cov_type     = params.get("covariance_type", "full")
+    random_state = params.get("random_state", 42)
+    max_iter     = params.get("max_iter", 200)
+    n_components = params["n_clusters"]
+
+    retry_regs = sorted(set([base_reg, 1e-4, 1e-3, 1e-2, 1e-1]))
+
+    last_error = None
+    for reg in retry_regs:
+        try:
+            gmm = GaussianMixture(
+                n_components    = n_components,
+                covariance_type = cov_type,
+                reg_covar       = reg,
+                random_state    = random_state,
+                max_iter        = max_iter,
+            )
+            cluster_ids = gmm.fit_predict(features)
+            if reg > base_reg:
+                print(f"  [gmm] reg_covar escalated to {reg:.0e} for numerical stability")
+            print(f"  [gmm] {n_components} components, BIC={gmm.bic(features):.2f}")
+            return cluster_ids
+        except ValueError as e:
+            last_error = e
+            continue
+
+    raise ValueError(
+        f"GMM failed on all reg_covar values {retry_regs}. "
+        f"The features may be too non-Gaussian for GMM (e.g. UMAP embeddings "
+        f"with many components relative to sample size). "
+        f"Consider using 'diag' or 'spherical' covariance_type, or skip GMM "
+        f"for this reduction. Original error: {last_error}"
     )
-
-    cluster_ids = gmm.fit_predict(features)
-    print(f"  [gmm] {params['n_clusters']} components, "
-          f"BIC={gmm.bic(features):.2f}")
-
-    return cluster_ids
 
 
 # -------------------------------------------------------

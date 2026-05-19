@@ -45,17 +45,26 @@ clustering:
     min_cluster_size: 5       # minimum images to form a cluster
     # min_samples: defaults to min_cluster_size (HDBSCAN library default)
 
-# Dimensionality reduction for density-based clustering
+# -------------------------------------------------------
+# Dimensionality Reduction
+#
+# One method is applied to ALL clustering algorithms.
+# Run the unlabeled analysis script to find the best setting:
+#   python cli/reduction_analysis_unlabeled.py --config <this_config>
+#
+# Supported methods:
+#   none      -- no reduction; use full 768D embeddings
+#   pca       -- PCA (linear, fast)
+#   umap      -- UMAP (non-linear, topology-preserving)
+#   pca+umap  -- two-stage: PCA first, then UMAP
+# -------------------------------------------------------
 reduction:
-  partition:
-    method: pca
-    n_components: 50
-  density:
-    method: umap
-    n_components: 100          # lower than 100 for small datasets
-    n_neighbors: 15           # lower for small datasets
-    min_dist: 0.1
-    metric: cosine
+  method: umap          # none | pca | umap | pca+umap
+  n_components: 20     # target dimension (ignored when method: none)
+  n_neighbors: 15       # UMAP only: local vs. global structure balance
+  min_dist: 0.1         # UMAP only: min distance in embedded space
+  metric: cosine        # UMAP only: distance metric in original space
+  # pca_components: 100 # pca+umap only: intermediate PCA dimension before UMAP
 
 # Annotation uncertainty settings
 annotation:
@@ -79,5 +88,5 @@ visualization:
   dpi: 300
   export_pdf: false
 
-output_dir: results/unlabeled_test
+output_dir: results/Annotation_eumoth/
 seed: 42

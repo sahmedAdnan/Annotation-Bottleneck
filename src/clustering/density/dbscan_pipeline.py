@@ -263,8 +263,12 @@ def eps_sweep(features: np.ndarray, true_label_ids: np.ndarray,
         # Exclude noise before computing metrics
         valid      = labels >= 0
         if valid.sum() > 0 and n_clusters > 1:
-            ari = adjusted_rand_score(true_label_ids[valid], labels[valid])
-            nmi = normalized_mutual_info_score(true_label_ids[valid], labels[valid])
+            import warnings
+            with warnings.catch_warnings():
+                warnings.filterwarnings("ignore", message="The number of unique classes",
+                                        category=UserWarning)
+                ari = adjusted_rand_score(true_label_ids[valid], labels[valid])
+                nmi = normalized_mutual_info_score(true_label_ids[valid], labels[valid])
         else:
             ari = 0.0
             nmi = 0.0

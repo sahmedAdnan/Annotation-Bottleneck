@@ -65,23 +65,33 @@ visualization:
   dpi: 300
   export_pdf: true
 
-output_dir: results/eumoth_dinov2
+output_dir: results/eumoth_dinov2/eumoth_pca100+umap_15
 seed: 42
 
 # -------------------------------------------------------
-# Dimensionality reduction (dual-path architecture)
+# Dimensionality Reduction
+#
+# One method is applied to ALL clustering algorithms.
+# Choose based on your dataset using the analysis scripts:
+#   Labeled data   -> python cli/reduction_analysis.py --config <config> --mode all
+#   Unlabeled data -> python cli/reduction_analysis_unlabeled.py --config <config>
+#
+# Supported methods:
+#   none      -- no reduction; use full 768D embeddings
+#   pca       -- PCA (linear, fast)
+#   umap      -- UMAP (non-linear, topology-preserving)
+#   pca+umap  -- two-stage: PCA first, then UMAP (preserves both global
+#                variance and local structure; set pca_components for the
+#                intermediate PCA dimension)
 # -------------------------------------------------------
 
 reduction:
-  partition:
-    method: pca
-    n_components: 50
-  density:
-    method: umap
-    n_components: 100
-    n_neighbors: 15
-    min_dist: 0.1
-    metric: cosine
+  method: pca+umap           # none | pca | umap | pca+umap
+  n_components: 15     # target dimension (ignored when method: none)
+  n_neighbors: 15       # UMAP only: local vs. global structure balance
+  min_dist: 0.1         # UMAP only: min distance in embedded space
+  metric: cosine        # UMAP only: distance metric in original space
+  # pca_components: 100 # pca+umap only: intermediate PCA dimension before UMAP
 
 dbscan:
   min_samples: 5

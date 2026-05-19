@@ -28,17 +28,13 @@ Pipeline:
 
 Usage:
     # GBIF mode (default):
-    python experiments/unlabeled_pipeline/run_unlabeled.py \\
-        --config experiments/unlabeled_pipeline/config_example.yaml
+    python experiments/unlabeled_pipeline/run_unlabeled.py --config experiments/unlabeled_pipeline/config_example.yaml
 
     # Local mode (no internet, folder names as candidates):
-    python experiments/unlabeled_pipeline/run_unlabeled.py \\
-        --config experiments/unlabeled_pipeline/config_example.yaml --local
+    python experiments/unlabeled_pipeline/run_unlabeled.py --config experiments/unlabeled_pipeline/config_example.yaml --local
 
     # CSV mode (taxonomy CSV as candidate list):
-    python experiments/unlabeled_pipeline/run_unlabeled.py \\
-        --config experiments/unlabeled_pipeline/config_example.yaml \\
-        --taxonomy path/to/european_moths.csv
+    python experiments/unlabeled_pipeline/run_unlabeled.py --config experiments/unlabeled_pipeline/config_example.yaml --taxonomy path/to/european_moths.csv
 """
 
 import argparse
@@ -134,9 +130,9 @@ def cluster_embeddings(features: np.ndarray,
         min_cluster_size = params.get("min_cluster_size", 3)
         min_samples = params.get("min_samples", None)
 
-        # Reduce dimensionality for density clustering
-        from src.reduction import reduce_for_density
-        features_reduced, _ = reduce_for_density(
+        # Reduce dimensionality for clustering
+        from src.reduction import reduce_features
+        features_reduced, _ = reduce_features(
             features, config, random_state=config.get("seed", 42)
         )
 
@@ -160,9 +156,9 @@ def cluster_embeddings(features: np.ndarray,
 
         n_clusters = params.get("n_clusters", 10)
 
-        # Reduce for partition clustering
-        from src.reduction import reduce_for_partition
-        features_reduced, _, _ = reduce_for_partition(
+        # Reduce dimensionality for clustering
+        from src.reduction import reduce_features
+        features_reduced, _ = reduce_features(
             features, config, random_state=config.get("seed", 42)
         )
 
@@ -494,10 +490,55 @@ def main():
                              "Multiple CSVs are merged sequentially.\n"
                              "Produces: annotations_final.csv, sorted_species/,\n"
                              "          species_list.csv, summary.txt, report.")
+    parser.add_argument("--apply-decisions", default=None, metavar="CSV_PATH",
+                        dest="apply_decisions",
+                        help="Apply the single decisions.csv produced by the\n"
+                             "interactive review.html (columns: file_path,\n"
+                             "final_label,status). Produces the clean\n"
+                             "imagefolder dataset, provenance.csv, and summary.")
     args = parser.parse_args()
 
     config = load_config(args.config)
     set_seed(config.get("seed", 42))
+
+    # ---- Apply-decisions mode: single decisions file from review.html ----
+    if args.apply_decisions:
+        from interactive_report import apply_decisions
+        from src.annotation.review import export_sorted_species, generate_summary
+
+        base_dir = config["output_dir"]
+        candidates_dirs = [base_dir.rstrip("/\\") + "_local", base_dir,
+                           base_dir.rstrip("/\\") + "_csv"]
+        output_dir = next(
+            (d for d in candidates_dirs
+             if os.path.exists(os.path.join(d, "annotations.csv"))), None)
+        if output_dir is None:
+            print("[error] No annotations.csv found in any of:")
+            for d in candidates_dirs:
+                print(f"        {d}")
+            sys.exit(1)
+        if not os.path.exists(args.apply_decisions):
+            print(f"[error] File not found: {args.apply_decisions}")
+            sys.exit(1)
+
+        ann_path = os.path.join(output_dir, "annotations.csv")
+        print(f"[apply] annotations: {ann_path}")
+        print(f"[apply] decisions  : {args.apply_decisions}")
+        annotations_df = pd.read_csv(ann_path)
+        final_df = apply_decisions(args.apply_decisions, annotations_df)
+
+        export_sorted_species(final_df, output_dir)
+        generate_summary(final_df, output_dir, config)
+        final_df.to_csv(os.path.join(output_dir, "annotations_final.csv"),
+                        index=False)
+        print(f"\n{'='*60}")
+        print("  APPLY-DECISIONS COMPLETE")
+        print(f"{'='*60}")
+        print(f"  annotations_final.csv  -- corrected annotations")
+        print(f"  sorted_species/        -- clean imagefolder dataset")
+        print(f"  species_list.csv, summary.txt")
+        print(f"{'='*60}")
+        sys.exit(0)
 
     # ---- Merge mode: apply expert CSV and exit ----
     if args.merge:
@@ -619,7 +660,15 @@ def main():
     if args.n_candidates and config.get("gbif"):
         config["gbif"]["n_candidates"] = args.n_candidates
 
-    images_dir = config["images_dir"]
+    # Image location: --images override, else top-level images_dir, else the
+    # standard dataset.root used by every dataset config.
+    images_dir = (config.get("images_dir")
+                  or config.get("dataset", {}).get("root"))
+    if not images_dir:
+        print("\n  ERROR: No image directory. Set dataset.root in the config "
+              "or pass --images <path>.")
+        sys.exit(1)
+    config["images_dir"] = images_dir
 
     header("UNLABELED SPECIMEN IDENTIFICATION PIPELINE")
     mode_labels = {"gbif": "GBIF API", "local": "Local (folder names)",
@@ -639,6 +688,38 @@ def main():
         "image_extensions", ["jpg", "jpeg", "png"]
     )
     image_paths = load_unlabeled_images(images_dir, extensions)
+
+    # If the dataset config defines an enabled subsample block, apply the
+    # SAME seeded subsample as the Task 1 clustering experiments so the
+    # annotation run operates on the identical data slice. Reuses the
+    # tested load_imagefolder + subsample_dataset (no new logic). Fails
+    # loud rather than silently processing the full dataset.
+    sub_cfg = config.get("dataset", {}).get("subsample", {})
+    if sub_cfg.get("enabled"):
+        from src.data.dataset import load_imagefolder, subsample_dataset
+        try:
+            paths, labels, class_names = load_imagefolder(
+                images_dir, extensions)
+        except Exception as e:
+            print(f"\n  ERROR: subsample is enabled but the dataset could "
+                  f"not be loaded as an imagefolder ({images_dir}): {e}")
+            sys.exit(1)
+        if not paths:
+            print(f"\n  ERROR: subsample is enabled but no class subfolders "
+                  f"were found under {images_dir}.")
+            sys.exit(1)
+        before = len(paths)
+        paths, labels, class_names = subsample_dataset(
+            paths, labels, class_names, config)
+        if not paths:
+            print("\n  ERROR: subsample produced 0 images. Check n_classes / "
+                  "min_images_per_class in the config.")
+            sys.exit(1)
+        image_paths = paths
+        print(f"    Subsample applied: {before} -> {len(image_paths)} "
+              f"images, {len(class_names)} classes "
+              f"(seed {sub_cfg.get('random_seed', 42)})")
+
     n_images = len(image_paths)
 
     print(f"    Loaded {n_images} images in {time.time()-t0:.1f}s")
@@ -1054,6 +1135,16 @@ def main():
         max_images_per_cluster=20, embed_images=embed,
         all_candidate_names=candidate_names,
         candidate_mode=candidate_mode,
+    )
+
+    # Interactive self-contained report for hand-off to an ecologist.
+    # One file, zero setup; produces a single decisions.csv that is applied
+    # back with: run_unlabeled.py --config ... --apply-decisions decisions.csv
+    from interactive_report import generate_interactive_report
+    generate_interactive_report(
+        annotations_df, reference_map,
+        os.path.join(output_dir, "review.html"),
+        config, candidate_mode=candidate_mode,
     )
 
     # =========================================================

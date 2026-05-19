@@ -1,0 +1,107 @@
+# -------------------------------------------------------
+# Config: CUB-200-2011  —  CLIP ViT-L/14 (OpenAI)
+# CUB uses common bird names (e.g. "Black_footed_Albatross"),
+# which appear in web text — CLIP may perform well here
+# compared to scientific moth names.
+# -------------------------------------------------------
+
+dataset:
+  name: cub200
+  format: cub
+  root: D:\Thesis\Test 1st\CUB_200_2011
+  image_extensions: [jpg, jpeg, png]
+  num_classes: 200
+
+model:
+  name: clip
+  arch: ViT-L-14
+  pretrained: openai
+  normalize_embeddings: true
+  batch_size: 64
+  num_workers: 8
+
+  # CUB common names (e.g. "Black footed Albatross") appear in web text,
+  # so CLIP aligns better here than on scientific moth names.
+  # Natural-language templates suit CLIP's training distribution.
+  prompt_templates:
+    - "{name}"
+    - "a photo of {name}"
+    - "a photo of a {name}"
+    - "a bird called {name}"
+    - "a wildlife photo of {name}"
+
+clustering:
+  methods:
+    - name: kmeans
+      n_clusters: 200
+      n_init: 50
+      random_state: 42
+      max_iter: 500
+
+    - name: agglomerative
+      n_clusters: 200
+      linkage: ward
+
+    - name: spectral
+      n_clusters: 200
+      n_init: 10
+      random_state: 42
+      n_neighbors: 60
+
+    - name: gmm
+      n_clusters: 200
+      covariance_type: diag    # 'full' is infeasible for 512-D embeddings
+      random_state: 42
+      max_iter: 300
+
+    - name: dbscan
+
+    - name: hdbscan
+
+evaluation:
+  top_k_confusions: 20
+
+visualization:
+  method: umap
+  umap:
+    n_neighbors: 30
+    min_dist: 0.1
+    metric: cosine
+    random_state: 42
+  subsample: 5000
+  dpi: 300
+  export_pdf: true
+
+output_dir: results/cub200_clip/cub200_umap_100
+seed: 42
+
+# -------------------------------------------------------
+# Dimensionality Reduction
+#
+# One method is applied to ALL clustering algorithms.
+# Choose based on your dataset using the analysis scripts:
+#   Labeled data   -> python cli/reduction_analysis.py --config <config> --mode all
+#   Unlabeled data -> python cli/reduction_analysis_unlabeled.py --config <config>
+#
+# Supported methods:
+#   none      -- no reduction; use full 768D embeddings
+#   pca       -- PCA (linear, fast)
+#   umap      -- UMAP (non-linear, topology-preserving)
+#   pca+umap  -- two-stage: PCA first, then UMAP (preserves both global
+#                variance and local structure; set pca_components for the
+#                intermediate PCA dimension)
+# -------------------------------------------------------
+
+reduction:
+  method: umap           # none | pca | umap | pca+umap
+  n_components: 100     # target dimension (ignored when method: none)
+  n_neighbors: 30       # UMAP only: local vs. global structure balance
+  min_dist: 0.1         # UMAP only: min distance in embedded space
+  metric: cosine        # UMAP only: distance metric in original space
+  # pca_components: 100 # pca+umap only: intermediate PCA dimension before UMAP
+
+dbscan:
+  min_samples: 10
+
+hdbscan:
+  sweep_range: [10, 15, 20, 25, 30, 35, 40, 45]

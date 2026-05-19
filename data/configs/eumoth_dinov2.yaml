@@ -1,0 +1,100 @@
+# -------------------------------------------------------
+# Config: EU-Moth Dataset  —  DINOv2 ViT-L/14
+# Pure vision model (no text encoder). Self-supervised
+# with DINO objective on LVD-142M. Strong spatial and
+# structural features; no taxonomic language alignment.
+#
+# DINOv2 has no text encoder — annotation requires
+# a CLIP-family model.
+# -------------------------------------------------------
+
+dataset:
+  name: eumoth
+  format: imagefolder
+  root: D:\Thesis\Test 1st\eu-moths-dataset-main\eu-moths-dataset-main\images
+  image_extensions: [jpg, jpeg, png]
+  num_classes: 200
+
+model:
+  name: dinov2
+  pretrained: vit_large_patch14_dinov2.lvd142m   # timm model name
+  normalize_embeddings: true
+  batch_size: 16     # 518x518 input needs ~5x more VRAM than 224x224; keep ≤16
+  num_workers: 8
+  # No prompt_templates — DINOv2 has no text encoder.
+
+clustering:
+  methods:
+    - name: kmeans
+      n_clusters: 200
+      n_init: 50
+      random_state: 42
+      max_iter: 500
+
+    - name: agglomerative
+      n_clusters: 200
+      linkage: ward
+
+    - name: spectral
+      n_clusters: 200
+      n_init: 10
+      random_state: 42
+      n_neighbors: 15
+
+    - name: gmm
+      n_clusters: 200
+      covariance_type: diag    # 'full' is infeasible for 512-D embeddings
+      random_state: 42
+      max_iter: 300
+
+    - name: dbscan
+
+    - name: hdbscan
+
+evaluation:
+  top_k_confusions: 20
+
+visualization:
+  method: umap
+  umap:
+    n_neighbors: 30
+    min_dist: 0.1
+    metric: cosine
+    random_state: 42
+  subsample: 5000
+  dpi: 300
+  export_pdf: true
+
+output_dir: results/eumoth_dinov2/eumoth_pca100+umap_15
+seed: 42
+
+# -------------------------------------------------------
+# Dimensionality Reduction
+#
+# One method is applied to ALL clustering algorithms.
+# Choose based on your dataset using the analysis scripts:
+#   Labeled data   -> python cli/reduction_analysis.py --config <config> --mode all
+#   Unlabeled data -> python cli/reduction_analysis_unlabeled.py --config <config>
+#
+# Supported methods:
+#   none      -- no reduction; use full 768D embeddings
+#   pca       -- PCA (linear, fast)
+#   umap      -- UMAP (non-linear, topology-preserving)
+#   pca+umap  -- two-stage: PCA first, then UMAP (preserves both global
+#                variance and local structure; set pca_components for the
+#                intermediate PCA dimension)
+# -------------------------------------------------------
+
+reduction:
+  method: pca+umap           # none | pca | umap | pca+umap
+  n_components: 15     # target dimension (ignored when method: none)
+  n_neighbors: 15       # UMAP only: local vs. global structure balance
+  min_dist: 0.1         # UMAP only: min distance in embedded space
+  metric: cosine        # UMAP only: distance metric in original space
+  # pca_components: 100 # pca+umap only: intermediate PCA dimension before UMAP
+
+dbscan:
+  min_samples: 5
+
+hdbscan:
+  sweep_range: [3, 5, 7, 10, 12, 15, 18, 21, 25, 30]

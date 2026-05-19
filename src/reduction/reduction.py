@@ -3,25 +3,46 @@ src/reduction/reduction.py
 --------------------------
 Dimensionality reduction utilities for the clustering pipeline.
 
-Two-path architecture (empirically validated on EU-Moth and CUB-200):
+Single-path architecture
+------------------------
+One reduction method is applied uniformly to ALL clustering algorithms in a
+pipeline run. The method is configured once in the YAML config and determines
+the feature space that every algorithm receives.
 
-    Partition methods  ->  PCA-50D
-        PCA's variance-maximization objective aligns with the variance-based
-        objectives of K-Means, Spectral, Agglomerative, and GMM.
-        PCA-50D retains 78-86% of variance across datasets and is the ONLY
-        reduction that works for all 4 partition methods (Spectral and GMM
-        fail on UMAP due to graph disconnection and singular covariances).
+Four modes are supported:
 
-    Density methods    ->  UMAP-100D
-        UMAP preserves local neighborhood structure, which aligns with the
-        density/neighborhood objectives of DBSCAN and HDBSCAN.
-        UMAP-100D achieves 5-10x less noise than PCA with comparable or
-        better ARI on both EU-Moth (ARI=0.9798) and CUB-200 (ARI=0.8455).
+    none      -- no reduction; all algorithms receive the full 768D embeddings.
+    pca       -- PCA: linear projection retaining the highest-variance axes.
+    umap      -- UMAP: non-linear projection preserving local neighbourhood
+                 topology.
+    pca+umap  -- two-stage: PCA to an intermediate dimension first (set via
+                 pca_components), then UMAP on the PCA output.
 
-References:
-    Ding & He (2004) — PCA and K-Means optimize dual objectives
-    McInnes et al. (2018) — UMAP preserves local topological structure
-    Beyer et al. (1999) — distance concentration in high dimensions
+Choosing the best mode
+----------------------
+Run the appropriate analysis script before committing a value to the config:
+
+    Labeled datasets   -> cli/reduction_analysis.py
+                          Sweeps PCA/UMAP/PCA+UMAP dimensions and ranks them
+                          by ARI, NMI, and Hungarian accuracy.
+
+    Unlabeled datasets -> cli/reduction_analysis_unlabeled.py
+                          Uses silhouette score (PCA path) and trustworthiness
+                          + weighted silhouette (UMAP path) -- no ground-truth
+                          labels needed.
+
+Critical constraint
+-------------------
+Dimensionality reduction applies ONLY for clustering. Text-image cosine
+similarity (annotation step) must always be computed in the original 768D
+CLIP embedding space. Reducing embeddings before text matching destroys the
+vision-language alignment learned during contrastive pretraining.
+
+References
+----------
+Ding & He (2004)        -- PCA and K-Means optimize dual objectives
+McInnes et al. (2018)   -- UMAP preserves local topological structure
+Beyer et al. (1999)     -- distance concentration in high dimensions
 """
 
 import warnings
@@ -31,24 +52,24 @@ from typing import Tuple, Optional
 
 
 # -------------------------------------------------------
-# PCA Reduction (for partition methods)
+# PCA
 # -------------------------------------------------------
 
 def fit_pca(features: np.ndarray,
             n_components: int = 50,
             random_state: int = 42) -> Tuple[np.ndarray, PCA, float]:
     """
-    Reduce features with PCA for partition-based clustering.
+    Reduce features with PCA.
 
     Args:
         features:      Raw embeddings, shape (N, D).
         n_components:  Target dimensionality (default 50).
-        random_state:  Random seed for reproducibility.
+        random_state:  Random seed.
 
     Returns:
-        reduced:       PCA-reduced features, shape (N, n_components).
-        pca:           Fitted PCA object (can project text centroids).
-        variance:      Fraction of total variance retained.
+        reduced:   PCA-reduced features, shape (N, n_components).
+        pca:       Fitted PCA object.
+        variance:  Fraction of total variance retained.
     """
     n_components = min(n_components, features.shape[1], features.shape[0])
 
@@ -63,7 +84,7 @@ def fit_pca(features: np.ndarray,
 
 
 # -------------------------------------------------------
-# UMAP Reduction (for density methods)
+# UMAP
 # -------------------------------------------------------
 
 def fit_umap(features: np.ndarray,
@@ -73,24 +94,24 @@ def fit_umap(features: np.ndarray,
              metric: str = "cosine",
              random_state: int = 42) -> Tuple[np.ndarray, object]:
     """
-    Reduce features with UMAP for density-based clustering.
+    Reduce features with UMAP.
 
-    UMAP preserves local neighborhood topology, which aligns with the
-    local-density objectives of DBSCAN and HDBSCAN. Unlike PCA, UMAP
-    does not distort the local density structure that density methods
-    rely on for cluster boundary detection.
+    The n_components value here targets clustering quality, not visualization.
+    Use larger values (e.g. 20-100) than typical 2D/3D visualization targets.
 
     Args:
         features:      Raw embeddings, shape (N, D).
         n_components:  Target dimensionality (default 100).
-        n_neighbors:   Controls local vs global structure (default 15).
-        min_dist:      Minimum distance in embedded space (default 0.1).
-        metric:        Distance metric (default "cosine").
-        random_state:  Random seed for reproducibility.
+        n_neighbors:   Controls local vs. global structure balance (default 15).
+        min_dist:      Minimum distance between points in embedded space
+                       (default 0.1). Values near 0 collapse points tightly;
+                       0.1 preserves small cluster structure.
+        metric:        Distance metric in original space (default "cosine").
+        random_state:  Random seed.
 
     Returns:
-        reduced:       UMAP-reduced features, shape (N, n_components).
-        reducer:       Fitted UMAP object.
+        reduced:   UMAP-reduced features, shape (N, n_components).
+        reducer:   Fitted UMAP object.
 
     Raises:
         ImportError: If umap-learn is not installed.
@@ -99,14 +120,12 @@ def fit_umap(features: np.ndarray,
         import umap as umap_lib
     except ImportError:
         raise ImportError(
-            "UMAP reduction requires: pip install umap-learn\n"
-            "Falling back to PCA is not recommended for density methods."
+            "UMAP reduction requires: pip install umap-learn"
         )
 
     print(f"  [reduction] UMAP: {features.shape[1]}D -> {n_components}D "
           f"(neighbors={n_neighbors}, min_dist={min_dist}, metric={metric}) ...")
 
-    # Suppress UMAP's "n_jobs overridden" notice when random_state is set
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore",
             message="n_jobs value.*overridden",
@@ -127,77 +146,87 @@ def fit_umap(features: np.ndarray,
 
 
 # -------------------------------------------------------
-# Config-driven reduction
+# Config reader
 # -------------------------------------------------------
 
 def get_reduction_config(config: dict) -> dict:
     """
     Extract reduction settings from config, with sensible defaults.
 
-    Config structure (all optional — defaults apply if omitted):
+    Expected config structure:
+
         reduction:
-          partition:
-            method: pca
-            n_components: 50
-          density:
-            method: umap
-            n_components: 100
-            n_neighbors: 15
-            min_dist: 0.1
-            metric: cosine
+          method: pca           # none | pca | umap | pca+umap
+          n_components: 50      # target dimension (ignored when method: none)
+          n_neighbors: 15       # UMAP only
+          min_dist: 0.1         # UMAP only
+          metric: cosine        # UMAP only
+          # pca_components: 100 # pca+umap only: intermediate PCA dimension
+
+    All keys are optional. Defaults are applied when omitted.
 
     Returns:
-        Dict with 'partition' and 'density' sub-dicts.
+        Flat dict with all reduction hyperparameters.
     """
-    reduction = config.get("reduction", {})
-
-    partition = reduction.get("partition", {})
-    density = reduction.get("density", {})
+    rcfg = config.get("reduction", {})
 
     return {
-        "partition": {
-            "method":       partition.get("method", "pca"),
-            "n_components": partition.get("n_components", 50),
-        },
-        "density": {
-            "method":       density.get("method", "umap"),
-            "n_components": density.get("n_components", 100),
-            "n_neighbors":  density.get("n_neighbors", 15),
-            "min_dist":     density.get("min_dist", 0.1),
-            "metric":       density.get("metric", "cosine"),
-        },
+        "method":         rcfg.get("method", "pca"),
+        "n_components":   rcfg.get("n_components", 50),
+        "pca_components": rcfg.get("pca_components", 100),
+        "n_neighbors":    rcfg.get("n_neighbors", 15),
+        "min_dist":       rcfg.get("min_dist", 0.1),
+        "metric":         rcfg.get("metric", "cosine"),
     }
 
 
-def reduce_for_partition(features: np.ndarray,
-                         config: dict,
-                         random_state: int = 42) -> Tuple[np.ndarray, Optional[PCA], float]:
+# -------------------------------------------------------
+# Unified reduction entry point
+# -------------------------------------------------------
+
+def reduce_features(features: np.ndarray,
+                    config: dict,
+                    random_state: int = 42) -> Tuple[np.ndarray, object]:
     """
-    Apply the configured reduction for partition methods.
+    Apply the configured reduction to features.
+
+    This is the single entry point used by all clustering methods. Every
+    algorithm in the pipeline run receives the same reduced feature space.
+
+    Supported methods (config key: reduction.method):
+        none      -- return features unchanged (full 768D)
+        pca       -- PCA to n_components dimensions
+        umap      -- UMAP to n_components dimensions
+        pca+umap  -- PCA to pca_components, then UMAP to n_components
+
+    Args:
+        features:      Raw L2-normalised embeddings, shape (N, D).
+        config:        Loaded YAML config dict.
+        random_state:  Random seed for reproducibility.
 
     Returns:
-        reduced, pca_object (or None), variance_retained
+        reduced:   Reduced features, shape (N, d').
+        reducer:   Fitted reducer object (PCA, UMAP reducer, or None when
+                   method is 'none'). For pca+umap the UMAP reducer is returned.
+
+    Raises:
+        ValueError: If method is not one of the four supported values.
     """
-    rcfg = get_reduction_config(config)["partition"]
+    rcfg = get_reduction_config(config)
+    method = rcfg["method"]
 
-    if rcfg["method"] == "pca":
-        return fit_pca(features, rcfg["n_components"], random_state)
-    else:
-        raise ValueError(f"Unknown partition reduction: {rcfg['method']}")
+    if method == "none":
+        print(f"  [reduction] No reduction — "
+              f"using full {features.shape[1]}D embeddings.")
+        return features, None
 
+    elif method == "pca":
+        reduced, pca, _ = fit_pca(
+            features, rcfg["n_components"], random_state
+        )
+        return reduced, pca
 
-def reduce_for_density(features: np.ndarray,
-                       config: dict,
-                       random_state: int = 42) -> Tuple[np.ndarray, object]:
-    """
-    Apply the configured reduction for density methods.
-
-    Returns:
-        reduced, reducer_object
-    """
-    rcfg = get_reduction_config(config)["density"]
-
-    if rcfg["method"] == "umap":
+    elif method == "umap":
         return fit_umap(
             features,
             n_components=rcfg["n_components"],
@@ -206,8 +235,47 @@ def reduce_for_density(features: np.ndarray,
             metric=rcfg["metric"],
             random_state=random_state,
         )
-    elif rcfg["method"] == "pca":
-        reduced, pca, _ = fit_pca(features, rcfg["n_components"], random_state)
-        return reduced, pca
+
+    elif method == "pca+umap":
+        pca_dim = rcfg["pca_components"]
+        print(f"  [reduction] PCA+UMAP: "
+              f"{features.shape[1]}D -> PCA-{pca_dim}D "
+              f"-> UMAP-{rcfg['n_components']}D")
+        pca_reduced, _, _ = fit_pca(features, pca_dim, random_state)
+        return fit_umap(
+            pca_reduced,
+            n_components=rcfg["n_components"],
+            n_neighbors=rcfg["n_neighbors"],
+            min_dist=rcfg["min_dist"],
+            metric=rcfg["metric"],
+            random_state=random_state,
+        )
+
     else:
-        raise ValueError(f"Unknown density reduction: {rcfg['method']}")
+        raise ValueError(
+            f"Unknown reduction method: '{method}'. "
+            f"Supported: none, pca, umap, pca+umap"
+        )
+
+
+# -------------------------------------------------------
+# Backward-compatibility shims
+# -------------------------------------------------------
+# Scripts that still import reduce_for_partition / reduce_for_density
+# continue to work without modification. New code should call
+# reduce_features() directly.
+
+def reduce_for_partition(features: np.ndarray,
+                         config: dict,
+                         random_state: int = 42
+                         ) -> Tuple[np.ndarray, Optional[PCA], float]:
+    """Backward-compat shim. Use reduce_features() in new code."""
+    reduced, reducer = reduce_features(features, config, random_state)
+    return reduced, reducer, 1.0
+
+
+def reduce_for_density(features: np.ndarray,
+                       config: dict,
+                       random_state: int = 42) -> Tuple[np.ndarray, object]:
+    """Backward-compat shim. Use reduce_features() in new code."""
+    return reduce_features(features, config, random_state)

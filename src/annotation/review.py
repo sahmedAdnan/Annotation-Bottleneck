@@ -414,9 +414,26 @@ def export_sorted_species(final_df: pd.DataFrame,
         source = str(row.get("annotation_source", "")).strip()
         cid = row.get("cluster_id", 0)
 
-        # Determine folder name
+        # Determine folder name.
+        #
+        # Routing priority. The final human or AI decision is the single
+        # source of truth, NOT the original cluster_id. A human who moved
+        # a noise image to a species means it belongs to that species, so
+        # that decision must override a stale cluster_id == -1.
+        #   1. Explicit deletion / junk        -> _FLAGGED
+        #   2. Explicit human "noise"          -> _NOISE
+        #   3. Human-assigned real species     -> species folder
+        #      (this is the noise-rescue case that was previously lost)
+        #   4. Still-unplaced AI noise         -> _NOISE
+        #   5. Otherwise                       -> species folder by label
+        human_labelled = ("Human_Expert", "Human_Confirmed")
         if label == "INVALID" or source == "Flagged_for_Deletion":
             folder_name = "_FLAGGED"
+        elif source == "Human_Noise":
+            folder_name = "_NOISE"
+        elif (source in human_labelled
+              and label and label.lower() not in ("nan", "invalid")):
+            folder_name = label.replace(" ", "_")
         elif cid == -1:
             folder_name = "_NOISE"
         else:

@@ -3,39 +3,40 @@ cli/reduction_analysis.py
 --------------------------
 Find the optimal dimensionality reduction for your dataset.
 
-Tests Full-D, PCA, UMAP, and PCA+UMAP on partition clustering methods
-(KMeans, Agglomerative, Spectral, GMM) and recommends the best reduction
-configuration for both partition and density-based clustering.
+Run a single reducer or all at once. Output files are named per mode
+so results from different runs never overwrite each other.
 
 Why this matters:
     PCA is linear, fast, maximizes variance -- good for partition methods.
     UMAP is non-linear, preserves local topology -- good for density methods.
     PCA+UMAP: PCA removes noise first, then UMAP separates non-linearly.
-    This tool measures which approach works best on YOUR data.
 
 Requires:
     <output_dir>/features.npz  (produced by cli/extract.py)
 
 Usage:
-    # Full comparison (PCA + UMAP + PCA+UMAP)
+    # PCA only -- custom or default dims, saves pca_analysis.csv
+    python cli/reduction_analysis.py --config configs/eumoth.yaml --mode pca
+    python cli/reduction_analysis.py --config configs/eumoth.yaml --mode pca --dims 20 50 100 200
+
+    # UMAP only -- saves umap_analysis.csv
+    python cli/reduction_analysis.py --config configs/eumoth.yaml --mode umap
+    python cli/reduction_analysis.py --config configs/eumoth.yaml --mode umap --dims 5 10 20 50 100
+
+    # PCA+UMAP two-stage -- saves pca_umap_analysis.csv
+    python cli/reduction_analysis.py --config configs/eumoth.yaml --mode pca+umap
+
+    # All reducers + full-dim baseline -- saves reduction_comparison.csv (default)
     python cli/reduction_analysis.py --config configs/eumoth.yaml
 
-    # Custom dimensions to test
-    python cli/reduction_analysis.py --config configs/eumoth.yaml --dims 20 50 100 200
+    # Include HDBSCAN in any mode
+    python cli/reduction_analysis.py --config configs/eumoth.yaml --mode umap --include-density
 
-    # PCA only (fast, no UMAP)
-    python cli/reduction_analysis.py --config configs/eumoth.yaml --skip-umap --skip-pca-umap
-
-    # Include density methods (HDBSCAN) in the comparison
-    python cli/reduction_analysis.py --config configs/eumoth.yaml --include-density
-
-    # Skip Spectral clustering (slow for large datasets)
-    python cli/reduction_analysis.py --config configs/eumoth.yaml --skip-spectral
-
-Produces:
-    <output_dir>/reduction_comparison.csv     (full results table)
-    <output_dir>/reduction_comparison.json    (structured results)
-    <output_dir>/reduction_recommendation.txt (human-readable summary)
+Output files per mode:
+    pca_analysis.csv / pca_recommendation.txt
+    umap_analysis.csv / umap_recommendation.txt
+    pca_umap_analysis.csv / pca_umap_recommendation.txt
+    reduction_comparison.csv / reduction_recommendation.txt  (mode=all / default)
 """
 
 import argparse
@@ -51,29 +52,37 @@ from sklearn.decomposition import PCA
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.utils.io import load_config, load_features, set_seed, ensure_dir
-from src.utils.pretty import header, subheader, metrics_table, done
+from src.utils.pretty import header, subheader, done
 from src.clustering.methods import run_clustering
 from src.evaluation.metrics import evaluate
 
 
 # -------------------------------------------------------
-# Default settings
+# Defaults
 # -------------------------------------------------------
 
 PARTITION_METHODS = ["kmeans", "agglomerative", "spectral", "gmm"]
-DENSITY_METHODS = ["hdbscan"]
+DENSITY_METHODS   = ["hdbscan"]
 
-DEFAULT_DIMS = [50, 100, 200]
-DEFAULT_PCA_PRE = 50
-DEFAULT_PCA_UMAP_TARGETS = [10, 20, 30, 40]
+DEFAULT_PCA_DIMS     = [20, 50, 75, 100, 150, 200]
+DEFAULT_UMAP_DIMS    = [5, 10, 20, 50, 100]
+DEFAULT_ALL_DIMS     = [50, 100, 200]
+DEFAULT_PCA_PRE      = 50
+DEFAULT_UMAP_TARGETS = [10, 20, 30, 40]
+
+MODE_OUTPUT = {
+    "pca":      ("pca_analysis.csv",       "pca_recommendation.txt"),
+    "umap":     ("umap_analysis.csv",      "umap_recommendation.txt"),
+    "pca+umap": ("pca_umap_analysis.csv",  "pca_umap_recommendation.txt"),
+    "all":      ("reduction_comparison.csv", "reduction_recommendation.txt"),
+}
 
 
 # -------------------------------------------------------
-# Reduction functions
+# Reduction helpers
 # -------------------------------------------------------
 
 def fit_pca(features, n_components):
-    """Fit PCA, return (reduced, pca_object, cumulative_variance)."""
     pca = PCA(n_components=n_components, random_state=42)
     reduced = pca.fit_transform(features)
     cum_var = float(pca.explained_variance_ratio_.sum())
@@ -82,11 +91,9 @@ def fit_pca(features, n_components):
     return reduced, pca, cum_var
 
 
-def fit_umap(features, n_components, n_neighbors=30, min_dist=0.0,
+def fit_umap(features, n_components, n_neighbors=30, min_dist=0.1,
              metric="cosine", random_state=42):
-    """Fit UMAP for intermediate reduction (not 2D visualization)."""
     import umap as umap_lib
-
     reducer = umap_lib.UMAP(
         n_components=n_components,
         n_neighbors=n_neighbors,
@@ -103,27 +110,24 @@ def fit_umap(features, n_components, n_neighbors=30, min_dist=0.0,
 
 
 # -------------------------------------------------------
-# Run one clustering method and evaluate
+# Clustering helpers
 # -------------------------------------------------------
 
 def run_single(method_name, features, params, true_labels, class_names):
-    """Run one clustering method, return metrics dict."""
     cluster_ids = run_clustering(method_name, features, params)
     metrics = evaluate(true_labels, cluster_ids, class_names, top_k=0)
     return {
-        "accuracy": metrics["accuracy"],
-        "ari":      metrics["ari"],
-        "nmi":      metrics["nmi"],
+        "accuracy":         metrics["accuracy"],
+        "ari":              metrics["ari"],
+        "nmi":              metrics["nmi"],
         "n_clusters_found": metrics["n_clusters_found"],
     }
 
 
 def get_method_params(config, method_name):
-    """Extract params for a method from config, with sensible defaults."""
     for entry in config.get("clustering", {}).get("methods", []):
         if entry["name"] == method_name:
             return {k: v for k, v in entry.items() if k != "name"}
-
     n_classes = config["dataset"]["num_classes"]
     defaults = {
         "kmeans":        {"n_clusters": n_classes, "n_init": 50, "random_state": 42},
@@ -138,24 +142,20 @@ def get_method_params(config, method_name):
 
 
 # -------------------------------------------------------
-# Print formatted results
+# Print helpers
 # -------------------------------------------------------
 
 def print_results_table(title, methods, columns, df, metric_key):
-    """Print: rows = methods, columns = reduction configs."""
-    col_width = 14
-    row_width = 16
+    col_width  = 14
+    row_width  = 16
     total_width = row_width + col_width * len(columns)
-
     print(f"\n  {title}:")
     print("  " + "-" * total_width)
-
     hdr = f"  {'Method':<{row_width}}"
     for col_label, _, _ in columns:
         hdr += f"{col_label:>{col_width}}"
     print(hdr)
     print("  " + "-" * total_width)
-
     for method in methods:
         row = f"  {method:<{row_width}}"
         for _, reducer, dim_lbl in columns:
@@ -163,68 +163,53 @@ def print_results_table(title, methods, columns, df, metric_key):
                        (df["reducer"] == reducer) &
                        (df["dim_label"] == dim_lbl)]
             if len(match) == 1 and match.iloc[0][metric_key] is not None:
-                val = match.iloc[0][metric_key]
-                row += f"{val:>{col_width}.4f}"
+                row += f"{match.iloc[0][metric_key]:>{col_width}.4f}"
             else:
                 row += f"{'--':>{col_width}}"
         print(row)
-
     print("  " + "-" * total_width)
 
 
-def print_recommendation(df, methods, output_dir):
-    """Print and save the recommended reduction for each method family."""
+def print_recommendation(df, methods, output_dir, rec_filename):
     lines = []
-
     lines.append("\n  RECOMMENDATION")
     lines.append("  " + "=" * 60)
-
-    # Best per method
     lines.append(f"\n  {'Method':<16} {'Reducer':>12} {'Dim':>6} "
                  f"{'Accuracy':>10} {'ARI':>10} {'NMI':>10}")
     lines.append("  " + "-" * 66)
 
     for method in methods:
-        method_df = df[df["method"] == method].dropna(subset=["accuracy"])
-        if len(method_df) == 0:
+        sub = df[df["method"] == method].dropna(subset=["accuracy"])
+        if sub.empty:
             continue
-        best_idx = method_df["accuracy"].idxmax()
-        best = method_df.loc[best_idx]
+        best = sub.loc[sub["accuracy"].idxmax()]
         reducer_str = best["reducer"] if best["reducer"] != "none" else "full"
         dim_str = f"{int(best['dimensions'])}D" if best["dim_label"] != "full" else "full"
-        line = (f"  {method:<16} {reducer_str:>12} {dim_str:>6} "
-                f"{best['accuracy']:>10.4f} {best['ari']:>10.4f} {best['nmi']:>10.4f}")
-        lines.append(line)
+        lines.append(f"  {method:<16} {reducer_str:>12} {dim_str:>6} "
+                     f"{best['accuracy']:>10.4f} {best['ari']:>10.4f} {best['nmi']:>10.4f}")
 
     lines.append("  " + "-" * 66)
 
-    # Overall recommendation
-    partition_methods = [m for m in methods if m in PARTITION_METHODS]
-    density_methods = [m for m in methods if m in DENSITY_METHODS]
+    part_df = df[df["method"].isin(PARTITION_METHODS)].dropna(subset=["accuracy"])
+    dens_df = df[df["method"].isin(DENSITY_METHODS)].dropna(subset=["accuracy"])
 
-    if partition_methods:
-        part_df = df[df["method"].isin(partition_methods)].dropna(subset=["accuracy"])
-        if len(part_df) > 0:
-            best = part_df.loc[part_df["accuracy"].idxmax()]
-            reducer = best["reducer"] if best["reducer"] != "none" else "full"
-            dim = int(best["dimensions"]) if best["dim_label"] != "full" else best["dimensions"]
-            lines.append(f"\n  Partition methods: Use {reducer.upper()}-{dim}D")
+    if not part_df.empty:
+        best = part_df.loc[part_df["accuracy"].idxmax()]
+        reducer = best["reducer"] if best["reducer"] != "none" else "full"
+        dim = int(best["dimensions"]) if best["dim_label"] != "full" else "full"
+        lines.append(f"\n  Partition methods: Use {reducer.upper()}-{dim}D")
 
-    if density_methods:
-        dens_df = df[df["method"].isin(density_methods)].dropna(subset=["accuracy"])
-        if len(dens_df) > 0:
-            best = dens_df.loc[dens_df["accuracy"].idxmax()]
-            reducer = best["reducer"] if best["reducer"] != "none" else "full"
-            dim = int(best["dimensions"]) if best["dim_label"] != "full" else best["dimensions"]
-            lines.append(f"  Density methods:   Use {reducer.upper()}-{dim}D")
+    if not dens_df.empty:
+        best = dens_df.loc[dens_df["accuracy"].idxmax()]
+        reducer = best["reducer"] if best["reducer"] != "none" else "full"
+        dim = int(best["dimensions"]) if best["dim_label"] != "full" else "full"
+        lines.append(f"  Density methods:   Use {reducer.upper()}-{dim}D")
 
     lines.append("")
-
     for line in lines:
         print(line)
 
-    # Save to file
-    rec_path = os.path.join(output_dir, "reduction_recommendation.txt")
+    rec_path = os.path.join(output_dir, rec_filename)
     with open(rec_path, "w") as f:
         f.write("\n".join(lines))
     print(f"  Saved to {rec_path}")
@@ -242,46 +227,48 @@ def main(config_path=None):
         )
         parser.add_argument("--config", required=True,
                             help="Path to YAML config (e.g. configs/eumoth.yaml)")
+        parser.add_argument("--mode", default="all",
+                            choices=["pca", "umap", "pca+umap", "all"],
+                            help=(
+                                "Which reducer(s) to test:\n"
+                                "  pca      - PCA only   -> pca_analysis.csv\n"
+                                "  umap     - UMAP only  -> umap_analysis.csv\n"
+                                "  pca+umap - Two-stage  -> pca_umap_analysis.csv\n"
+                                "  all      - All + full-dim baseline (default)\n"
+                            ))
         parser.add_argument("--dims", type=int, nargs="+", default=None,
-                            help="Dimension counts to test.\nDefault: [50, 100, 200]")
-        parser.add_argument("--skip-pca", action="store_true",
-                            help="Skip PCA-only reduction.")
-        parser.add_argument("--skip-umap", action="store_true",
-                            help="Skip UMAP-only reduction.")
-        parser.add_argument("--skip-pca-umap", action="store_true",
-                            help="Skip PCA+UMAP combined reduction.")
+                            help=(
+                                "Target dimensions to test.\n"
+                                "  mode=pca:      default [20, 50, 75, 100, 150, 200]\n"
+                                "  mode=umap:     default [5, 10, 20, 50, 100]\n"
+                                "  mode=pca+umap: UMAP target dims, default [10, 20, 30, 40]\n"
+                                "  mode=all:      applies to both PCA and UMAP, default [50, 100, 200]"
+                            ))
+        parser.add_argument("--pca-pre", type=int, default=None,
+                            help="PCA pre-reduction dim for pca+umap mode (default: 50).")
+        parser.add_argument("--umap-neighbors", type=int, default=30,
+                            help="UMAP n_neighbors (default: 30).")
+        parser.add_argument("--umap-min-dist", type=float, default=0.1,
+                            help="UMAP min_dist (default: 0.1, matches production pipeline).")
         parser.add_argument("--skip-spectral", action="store_true",
                             help="Skip Spectral clustering (slow for N > 5000).")
         parser.add_argument("--include-density", action="store_true",
-                            help="Also test HDBSCAN on each reduction.")
-        parser.add_argument("--umap-neighbors", type=int, default=30,
-                            help="UMAP n_neighbors (default: 30).")
-        parser.add_argument("--umap-min-dist", type=float, default=0.0,
-                            help="UMAP min_dist (default: 0.0 for clustering).")
-        parser.add_argument("--pca-pre", type=int, default=None,
-                            help="PCA pre-reduction dim for PCA+UMAP (default: 50).")
-        parser.add_argument("--pca-umap-targets", type=int, nargs="+", default=None,
-                            help="UMAP target dims for PCA+UMAP.\n"
-                                 "Default: [10, 20, 30, 40].")
+                            help="Also test HDBSCAN alongside partition methods.")
         args = parser.parse_args()
         config_path = args.config
     else:
-        # Called programmatically with defaults
         class Args:
-            dims = None; skip_pca = False; skip_umap = False
-            skip_pca_umap = False; skip_spectral = False
-            include_density = False; umap_neighbors = 30
-            umap_min_dist = 0.0; pca_pre = None; pca_umap_targets = None
+            mode = "all"; dims = None; pca_pre = None
+            skip_spectral = False; include_density = False
+            umap_neighbors = 30; umap_min_dist = 0.1
         args = Args()
 
     config = load_config(config_path)
-    seed = config.get("seed", 42)
-    set_seed(seed)
+    set_seed(config.get("seed", 42))
 
     output_dir = config["output_dir"]
     ensure_dir(output_dir)
 
-    # Load features
     features_path = os.path.join(output_dir, "features.npz")
     if not os.path.exists(features_path):
         print(f"\n  ERROR: {features_path} not found.")
@@ -290,133 +277,134 @@ def main(config_path=None):
 
     features, labels, _, class_names = load_features(features_path)
     true_labels = np.array(labels, dtype=np.int32)
-    full_dim = features.shape[1]
-    N = features.shape[0]
+    full_dim    = features.shape[1]
+    N           = features.shape[0]
 
-    # Settings
-    dims = args.dims or DEFAULT_DIMS
-    dims = sorted(set(d for d in dims if d < full_dim))
-    if not dims:
-        dims = [full_dim // 2]
+    mode = args.mode
+    csv_filename, rec_filename = MODE_OUTPUT[mode]
 
-    methods = [m for m in PARTITION_METHODS]
+    run_pca      = mode in ("pca", "all")
+    run_umap     = mode in ("umap", "all")
+    run_pca_umap = mode in ("pca+umap", "all")
+    include_full = (mode == "all")
+
+    pca_pre_dim = args.pca_pre or DEFAULT_PCA_PRE
+    umap_nn     = args.umap_neighbors
+    umap_md     = args.umap_min_dist
+
+    # Resolve dims per mode
+    if args.dims:
+        user_dims    = sorted(set(d for d in args.dims if d < full_dim))
+        pca_dims     = user_dims if run_pca else []
+        umap_dims    = user_dims if run_umap else []
+        umap_targets = sorted(d for d in user_dims if d < pca_pre_dim) if run_pca_umap else []
+    else:
+        pca_dims     = [d for d in DEFAULT_PCA_DIMS  if d < full_dim] if run_pca else []
+        umap_dims    = [d for d in DEFAULT_UMAP_DIMS if d < full_dim] if run_umap else []
+        umap_targets = list(DEFAULT_UMAP_TARGETS)                       if run_pca_umap else []
+        if mode == "all":
+            pca_dims  = [d for d in DEFAULT_ALL_DIMS if d < full_dim]
+            umap_dims = [d for d in DEFAULT_ALL_DIMS if d < full_dim]
+
+    umap_targets = [d for d in umap_targets if d < pca_pre_dim]
+    if run_pca_umap and not umap_targets:
+        umap_targets = [pca_pre_dim // 2]
+
+    # Methods
+    methods = list(PARTITION_METHODS)
     if args.skip_spectral:
         methods = [m for m in methods if m != "spectral"]
     elif N > 10000:
-        print(f"  WARNING: N={N}. Spectral uses O(N^2) memory. "
-              f"Use --skip-spectral if needed.\n")
-
+        print(f"  WARNING: N={N}. Spectral uses O(N²) memory. "
+              f"Consider --skip-spectral.\n")
     if args.include_density:
         methods.extend(DENSITY_METHODS)
-
-    run_pca = not args.skip_pca
-    run_umap = not args.skip_umap
-    run_pca_umap = not args.skip_pca_umap
-
-    if not run_pca and not run_umap and not run_pca_umap:
-        print("ERROR: All reducers skipped. Nothing to compare.")
-        sys.exit(1)
-
-    umap_nn = args.umap_neighbors
-    umap_md = args.umap_min_dist
-    pca_pre_dim = args.pca_pre or DEFAULT_PCA_PRE
-    pca_umap_targets = args.pca_umap_targets or DEFAULT_PCA_UMAP_TARGETS
-    pca_umap_targets = [d for d in pca_umap_targets if d < pca_pre_dim]
-    if run_pca_umap and not pca_umap_targets:
-        pca_umap_targets = [pca_pre_dim // 2]
 
     # Banner
     header("DIMENSIONALITY REDUCTION ANALYSIS")
     print(f"\n  Dataset : {config['dataset']['name']}")
     print(f"  Model   : {config['model']['name']}")
     print(f"  Images  : {N}  |  Classes: {len(class_names)}  |  Full dim: {full_dim}")
+    print(f"  Mode    : {mode.upper()}")
     print(f"  Methods : {', '.join(methods)}")
-    print(f"  Dims    : {dims}")
-    reducers = []
-    if run_pca:      reducers.append("PCA")
-    if run_umap:     reducers.append(f"UMAP(nn={umap_nn})")
-    if run_pca_umap: reducers.append(f"PCA({pca_pre_dim})+UMAP->{pca_umap_targets}")
-    print(f"  Reducers: {', '.join(reducers)} + full-D baseline\n")
+    if run_pca:      print(f"  PCA dims      : {pca_dims}")
+    if run_umap:     print(f"  UMAP dims     : {umap_dims}  (nn={umap_nn}, md={umap_md})")
+    if run_pca_umap: print(f"  PCA({pca_pre_dim})+UMAP  : {umap_targets}")
+    print(f"  Output  : {csv_filename}\n")
 
-    # ---- Pre-compute reductions ----
-    reductions = {}
+    # ---- Compute reductions ----
+    reductions   = {}
     pca_variance = {}
 
     if run_pca:
-        subheader("Computing PCA reductions")
-        for dim in dims:
+        subheader("PCA reductions")
+        for dim in pca_dims:
             reduced, _, cum_var = fit_pca(features, dim)
             reductions[("pca", dim)] = reduced
             pca_variance[dim] = cum_var
 
     if run_umap:
-        subheader("Computing UMAP reductions")
+        subheader("UMAP reductions")
         try:
-            for dim in dims:
+            for dim in umap_dims:
                 reduced = fit_umap(features, dim, n_neighbors=umap_nn,
-                                   min_dist=umap_md, random_state=seed)
+                                   min_dist=umap_md, random_state=config.get("seed", 42))
                 reductions[("umap", dim)] = reduced
         except ImportError:
-            print("  ERROR: umap-learn not installed. Use --skip-umap.")
+            print("  ERROR: umap-learn not installed. pip install umap-learn")
             run_umap = False
 
     if run_pca_umap:
-        subheader(f"Computing PCA({pca_pre_dim})+UMAP reductions")
+        subheader(f"PCA({pca_pre_dim})+UMAP reductions")
         try:
             if ("pca", pca_pre_dim) in reductions:
                 pca_pre_features = reductions[("pca", pca_pre_dim)]
-                print(f"    Reusing PCA-{pca_pre_dim}D from earlier")
+                print(f"    Reusing PCA-{pca_pre_dim}D")
             else:
                 pca_pre_features, _, _ = fit_pca(features, pca_pre_dim)
-
-            for target_dim in pca_umap_targets:
-                reduced = fit_umap(pca_pre_features, target_dim,
-                                   n_neighbors=umap_nn, min_dist=umap_md,
-                                   metric="euclidean", random_state=seed)
-                reductions[(f"pca{pca_pre_dim}+umap", target_dim)] = reduced
+            for td in umap_targets:
+                reduced = fit_umap(pca_pre_features, td, n_neighbors=umap_nn,
+                                   min_dist=umap_md, metric="euclidean",
+                                   random_state=config.get("seed", 42))
+                reductions[(f"pca{pca_pre_dim}+umap", td)] = reduced
         except ImportError:
-            print("  ERROR: umap-learn not installed. Use --skip-pca-umap.")
+            print("  ERROR: umap-learn not installed. pip install umap-learn")
             run_pca_umap = False
 
     # ---- Build experiment list ----
-    experiments = [{"reducer": "none", "dim_label": "full",
-                    "dim": full_dim, "features": features}]
-
+    experiments = []
+    if include_full:
+        experiments.append({"reducer": "none", "dim_label": "full",
+                            "dim": full_dim, "features": features})
     if run_pca:
-        for dim in dims:
+        for dim in pca_dims:
             experiments.append({"reducer": "pca", "dim_label": str(dim),
                                 "dim": dim, "features": reductions[("pca", dim)]})
-
     if run_umap:
-        for dim in dims:
+        for dim in umap_dims:
             experiments.append({"reducer": "umap", "dim_label": str(dim),
                                 "dim": dim, "features": reductions[("umap", dim)]})
-
     if run_pca_umap:
-        for target_dim in pca_umap_targets:
+        for td in umap_targets:
             label = f"pca{pca_pre_dim}+umap"
-            experiments.append({"reducer": label, "dim_label": str(target_dim),
-                                "dim": target_dim,
-                                "features": reductions[(label, target_dim)]})
+            experiments.append({"reducer": label, "dim_label": str(td),
+                                "dim": td, "features": reductions[(label, td)]})
 
-    # ---- Run all experiments ----
-    subheader("Running clustering experiments")
+    # ---- Run clustering ----
+    subheader("Clustering experiments")
     results = []
     t_start = time.time()
 
     for exp in experiments:
         reducer_info = (f"{exp['reducer']}-{exp['dim_label']}D"
                         if exp['reducer'] != 'none' else f"full-{exp['dim']}D")
-
         for method_name in methods:
             params = get_method_params(config, method_name)
             print(f"    {method_name:<16s} @ {reducer_info}")
             t0 = time.time()
-
             try:
                 metrics = run_single(method_name, exp["features"], params,
                                      true_labels, class_names)
-                elapsed = time.time() - t0
                 results.append({
                     "method":     method_name,
                     "reducer":    exp["reducer"],
@@ -426,7 +414,7 @@ def main(config_path=None):
                     "ari":        round(metrics["ari"], 4),
                     "nmi":        round(metrics["nmi"], 4),
                     "n_clusters": metrics["n_clusters_found"],
-                    "time_sec":   round(elapsed, 1),
+                    "time_sec":   round(time.time() - t0, 1),
                 })
             except Exception as e:
                 print(f"      ERROR: {e}")
@@ -444,52 +432,53 @@ def main(config_path=None):
     header("RESULTS")
     print(f"\n  Dataset: {config['dataset']['name']}  |  "
           f"Model: {config['model']['name']}  |  "
+          f"Mode: {mode.upper()}  |  "
           f"Time: {int(total_time//60)}m {total_time%60:.0f}s\n")
 
-    # PCA variance summary
-    if run_pca:
+    if pca_variance:
         print("  PCA Explained Variance:")
-        for dim in dims:
-            print(f"    {dim:>4}D: {pca_variance[dim]*100:.1f}%")
+        for dim, var in pca_variance.items():
+            print(f"    {dim:>4}D: {var*100:.1f}%")
         print()
 
-    # Build column list
-    columns = [("full", "none", "full")]
+    columns = []
+    if include_full:
+        columns.append(("full", "none", "full"))
     if run_pca:
-        for dim in dims:
+        for dim in pca_dims:
             columns.append((f"PCA-{dim}", "pca", str(dim)))
     if run_umap:
-        for dim in dims:
+        for dim in umap_dims:
             columns.append((f"UMAP-{dim}", "umap", str(dim)))
     if run_pca_umap:
-        for td in pca_umap_targets:
+        for td in umap_targets:
             columns.append((f"P{pca_pre_dim}U{td}", f"pca{pca_pre_dim}+umap", str(td)))
 
-    print_results_table("Hungarian Accuracy", methods, columns, df, "accuracy")
-    print_results_table("Adjusted Rand Index", methods, columns, df, "ari")
-    print_results_table("Normalized Mutual Information", methods, columns, df, "nmi")
+    print_results_table("Hungarian Accuracy",             methods, columns, df, "accuracy")
+    print_results_table("Adjusted Rand Index",            methods, columns, df, "ari")
+    print_results_table("Normalized Mutual Information",  methods, columns, df, "nmi")
 
-    # Recommendation
-    print_recommendation(df, methods, output_dir)
+    print_recommendation(df, methods, output_dir, rec_filename)
 
-    # ---- Save outputs ----
-    csv_path = os.path.join(output_dir, "reduction_comparison.csv")
+    # ---- Save ----
+    csv_path = os.path.join(output_dir, csv_filename)
     df.to_csv(csv_path, index=False)
-    print(f"\n  [save] Results CSV  -> {csv_path}")
+    print(f"\n  [save] CSV  -> {csv_path}")
 
-    json_data = {
-        "dataset":     config["dataset"]["name"],
-        "model":       config["model"]["name"],
-        "full_dim":    full_dim,
-        "n_images":    N,
-        "n_classes":   len(class_names),
-        "dims_tested": dims,
-        "results":     results,
-    }
-    json_path = os.path.join(output_dir, "reduction_comparison.json")
+    json_path = csv_path.replace(".csv", ".json")
     with open(json_path, "w") as f:
-        json.dump(json_data, f, indent=2)
-    print(f"  [save] Results JSON -> {json_path}")
+        json.dump({
+            "dataset":   config["dataset"]["name"],
+            "model":     config["model"]["name"],
+            "mode":      mode,
+            "full_dim":  full_dim,
+            "n_images":  N,
+            "n_classes": len(class_names),
+            "pca_dims":  pca_dims,
+            "umap_dims": umap_dims,
+            "results":   results,
+        }, f, indent=2)
+    print(f"  [save] JSON -> {json_path}")
 
     done(output_dir)
 

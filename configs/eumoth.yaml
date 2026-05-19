@@ -32,7 +32,7 @@ model:
   # Templates with unfillable placeholders are silently skipped.
   prompt_templates:
     - "{name}"
-    - "{name}, family {family}"
+    - "a photo of {name}"
     - "a photo of {name}, a moth"
     - "{name}, family {family}, order {order}"
     - "a species of genus {genus}, family {family}"
@@ -91,30 +91,34 @@ visualization:
   dpi: 300
   export_pdf: true
 
-output_dir: results/eumoth
+output_dir: results/eumoth/eumoth_full-dimension 
 seed: 42
 
 # -------------------------------------------------------
-# Dimensionality reduction
+# Dimensionality Reduction
 #
-# Dual-path architecture (validated on EU-Moth and CUB-200):
-#   - Partition methods (KMeans, Spectral, etc.) -> PCA-50D
-#   - Density methods (DBSCAN, HDBSCAN) -> UMAP-100D
+# One method is applied to ALL clustering algorithms.
+# Choose based on your dataset using the analysis scripts:
+#   Labeled data   -> python cli/reduction_analysis.py --config <config> --mode all
+#   Unlabeled data -> python cli/reduction_analysis_unlabeled.py --config <config>
 #
-# These defaults are empirically optimal. Override only if
-# you have experiment results justifying different values.
+# Supported methods:
+#   none      -- no reduction; use full 768D embeddings
+#   pca       -- PCA (linear, fast)
+#   umap      -- UMAP (non-linear, topology-preserving)
+#   pca+umap  -- two-stage: PCA first, then UMAP (preserves both global
+#                variance and local structure; set pca_components for the
+#                intermediate PCA dimension)
 # -------------------------------------------------------
 
 reduction:
-  partition:
-    method: pca
-    n_components: 50
-  density:
-    method: umap
-    n_components: 100
-    n_neighbors: 15
-    min_dist: 0.1
-    metric: cosine
+  method: none           # none | pca | umap | pca+umap
+  n_components: 50      # target dimension (ignored when method: none)
+  #### For UMAP JUST Tune the following ###
+  n_neighbors: 15       # UMAP only: local vs. global structure balance
+  min_dist: 0.1         # UMAP only: min distance in embedded space
+  metric: cosine        # UMAP only: distance metric in original space
+  # pca_components: 100 # pca+umap only: intermediate PCA dimension before UMAP
 
 # -------------------------------------------------------
 # DBSCAN configuration
@@ -186,8 +190,8 @@ annotation:
     weights:
       text_margin: 0.35
       membership_probability: 0.25
-      cluster_agreement: 0.15
-      taxonomic_consistency: 0.25
+      cluster_agreement: 0.25
+      taxonomic_consistency: 0.15
 
   include_sanity_check: true
   n_sanity: 25

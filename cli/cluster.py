@@ -3,21 +3,20 @@ cli/cluster.py
 --------------
 CLI command: Run ALL clustering methods defined in config.
 
-Dual-path dimensionality reduction (empirically validated):
+Single reduction, all methods
+------------------------------
+One dimensionality reduction is applied to all clustering algorithms.
+The method is set once in the config (reduction.method) and all six
+algorithms receive the same reduced feature space:
 
-    Partition methods (kmeans, spectral, agglomerative, gmm)
-        -> PCA-50D  (variance-maximization aligns with partition objectives)
+    none      -- full 768D embeddings (no reduction)
+    pca       -- PCA to n_components dimensions
+    umap      -- UMAP to n_components dimensions
+    pca+umap  -- PCA to pca_components, then UMAP to n_components
 
-    Density methods (dbscan, hdbscan)
-        -> UMAP-100D  (topology-preservation aligns with density objectives)
-
-Routing logic:
-  - kmeans, spectral, agglomerative, gmm
-        -> PCA-50D features via src/clustering/methods.py
-  - dbscan
-        -> UMAP-100D features via DBSCANPipeline
-  - hdbscan
-        -> UMAP-100D features via HDBSCANPipeline
+Run cli/reduction_analysis.py (labeled) or
+cli/reduction_analysis_unlabeled.py (unlabeled) to find the best
+reduction method and dimension for your dataset before running this.
 
 Usage:
     python cli/cluster.py --config configs/eumoth.yaml
@@ -49,7 +48,7 @@ from src.utils.pretty  import (header, subheader, metrics_table,
                                 comparison_table, verdict, warning,
                                 done, saved)
 from src.clustering.methods import run_clustering
-from src.reduction import reduce_for_partition, reduce_for_density, get_reduction_config
+from src.reduction import reduce_features, get_reduction_config
 
 
 # -------------------------------------------------------
@@ -189,33 +188,23 @@ def main(config_path: str = None,
           f"{len(class_names)} classes | dim={features.shape[1]}")
     print(f"  Methods : {', '.join(method_names)}")
 
-    # ---- Reduction config ----
-    rcfg = get_reduction_config(config)
-    print(f"\n  Reduction (partition) : {rcfg['partition']['method'].upper()}-"
-          f"{rcfg['partition']['n_components']}D")
-    print(f"  Reduction (density)  : {rcfg['density']['method'].upper()}-"
-          f"{rcfg['density']['n_components']}D")
+    # ---- Reduction config label ----
+    rcfg   = get_reduction_config(config)
+    method = rcfg["method"]
+    if method == "none":
+        reduction_label = f"Full-D ({features.shape[1]})"
+    elif method == "pca+umap":
+        reduction_label = (f"PCA-{rcfg['pca_components']}D "
+                           f"-> UMAP-{rcfg['n_components']}D")
+    else:
+        reduction_label = f"{method.upper()}-{rcfg['n_components']}D"
+    print(f"\n  Reduction : {reduction_label}")
 
-    # ---- PCA reduction for partition methods ----
-    features_pca = None
-    pca_object   = None
-    if has_partition:
-        subheader("Dimensionality reduction for partition methods")
-        features_pca, pca_object, pca_var = reduce_for_partition(
-            features, config, random_state=config.get("seed", 42)
-        )
-
-    # ---- UMAP reduction for density methods ----
-    features_umap = None
-    density_reduction_label = None
-    if has_density:
-        subheader("Dimensionality reduction for density methods")
-        d_cfg = rcfg["density"]
-        density_reduction_label = (f"{d_cfg['method'].upper()}-"
-                                   f"{d_cfg['n_components']}D")
-        features_umap, _ = reduce_for_density(
-            features, config, random_state=config.get("seed", 42)
-        )
+    # ---- Single reduction for all methods ----
+    subheader("Dimensionality reduction")
+    features_reduced, _ = reduce_features(
+        features, config, random_state=config.get("seed", 42)
+    )
 
     # ---- Pre-compute 2D projection for density visualization ----
     features_2d = None
@@ -237,8 +226,9 @@ def main(config_path: str = None,
         subheader(f"Method {i}/{total}:  {name.upper()}")
         t0 = time.time()
 
+        print(f"    Reduction: {reduction_label}")
+
         if name in DENSITY_METHODS:
-            print(f"    Reduction: {density_reduction_label or 'UMAP-100D'}")
             # Check skip flags
             if skip_density:
                 print("    [skip] density methods (--skip-density)")
@@ -250,25 +240,18 @@ def main(config_path: str = None,
                 print("    [skip] hdbscan (--skip-hdbscan)")
                 continue
 
-            # Full diagnostic pipeline with UMAP-reduced features
             results = _run_density(
                 name, method_cfg,
                 features, true_label_ids, class_names,
                 features_2d, output_dir, config,
-                features_reduced=features_umap,
-                reduction_label=density_reduction_label,
+                features_reduced=features_reduced,
+                reduction_label=reduction_label,
             )
             all_results[name] = results
 
         else:
-            # Partition methods: use PCA-reduced features
-            reduction_info = (f"PCA-{features_pca.shape[1]}D"
-                              if features_pca is not None else "Full-D")
-            print(f"    Reduction: {reduction_info}")
-            use_features = features_pca if features_pca is not None else features
-
             cluster_ids = run_clustering(
-                method_name=name, features=use_features,
+                method_name=name, features=features_reduced,
                 params=method_cfg,
             )
             save_clusters(
@@ -276,7 +259,6 @@ def main(config_path: str = None,
                 cluster_ids, name, method_cfg,
             )
 
-            # Quick inline metric preview
             from src.evaluation.metrics import hungarian_accuracy
             from sklearn.metrics import adjusted_rand_score, normalized_mutual_info_score
             valid = cluster_ids >= 0
@@ -294,16 +276,14 @@ def main(config_path: str = None,
             }
 
             elapsed = time.time() - t0
-            reduction_info = (f"PCA-{features_pca.shape[1]}D"
-                              if features_pca is not None else "Full-D")
             metrics_table([
-                {"label": "ARI",           "value": ari},
-                {"label": "NMI",           "value": nmi},
-                {"label": "Accuracy",      "value": acc},
-                {"label": "Clusters",      "value": all_results[name]["n_clusters"],
+                {"label": "ARI",       "value": ari},
+                {"label": "NMI",       "value": nmi},
+                {"label": "Accuracy",  "value": acc},
+                {"label": "Clusters",  "value": all_results[name]["n_clusters"],
                  "note": f"/ {len(class_names)} expected"},
-                {"label": "Reduction",     "value": reduction_info},
-                {"label": "Time",          "value": f"{elapsed:.1f}s"},
+                {"label": "Reduction", "value": reduction_label},
+                {"label": "Time",      "value": f"{elapsed:.1f}s"},
             ], title=f"{name} — quick metrics")
 
     # Density comparison figure (if both density methods ran)

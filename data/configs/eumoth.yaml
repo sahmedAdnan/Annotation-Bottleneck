@@ -1,0 +1,197 @@
+# -------------------------------------------------------
+# Config: EU-Moth Dataset
+# 200 European moth species, ImageFolder format
+# -------------------------------------------------------
+
+dataset:
+  name: eumoth
+  format: imagefolder                        # imagefolder | cub
+  root: D:\Thesis\Test 1st\eu-moths-dataset-main\eu-moths-dataset-main\images    # path to the folder of class subfolders
+  image_extensions: [jpg, jpeg, png]
+  num_classes: 200
+
+model:
+  name: bioclip2                             # bioclip2 | bioclip | clip | dinov2
+  pretrained: hf-hub:imageomics/bioclip-2
+  normalize_embeddings: true
+  batch_size: 64
+  num_workers: 8
+
+  # Prompt templates for zero-shot text matching in the annotation step.
+  #
+  # BioCLIP-2 was trained on TreeOfLife-200M with GBIF taxonomic text.
+  # Templates use only taxonomic vocabulary the model has seen during
+  # training: scientific names, genus, family, order.
+  #
+  # PLACEHOLDERS (filled from GBIF taxonomy lookup):
+  #   {name}   -> scientific binomial  (e.g. "abrostola tripartita")
+  #   {genus}  -> genus                (e.g. "abrostola")
+  #   {family} -> family               (e.g. "Noctuidae")
+  #   {order}  -> order                (e.g. "Lepidoptera")
+  #
+  # Templates with unfillable placeholders are silently skipped.
+  prompt_templates:
+    - "{name}"
+    - "a photo of {name}"
+    - "a photo of {name}, a moth"
+    - "{name}, family {family}, order {order}"
+    - "a species of genus {genus}, family {family}"
+
+clustering:
+  methods:
+    - name: kmeans
+      n_clusters: 200
+      n_init: 50
+      random_state: 42
+      max_iter: 500
+
+    - name: agglomerative
+      n_clusters: 200
+      linkage: ward
+
+    - name: spectral
+      n_clusters: 200
+      n_init: 10
+      random_state: 42
+      # n_neighbors controls the affinity graph. Too small a value leaves
+      # some images disconnected, causing sklearn's "Graph is not fully
+      # connected" warning and less reliable eigenvectors. 15 is sufficient
+      # for ~2000 images with 200 classes (~11 images/class).
+      n_neighbors: 15
+
+    - name: gmm
+      n_clusters: 200
+      covariance_type: diag    # 'full' is infeasible for 512-D embeddings
+      random_state: 42
+      max_iter: 300
+
+    # DBSCAN: all detailed parameters live in the dbscan: block below.
+    # This entry is a routing declaration only — do not add min_samples
+    # or eps here, as they would conflict with the dedicated block.
+    - name: dbscan
+
+    # HDBSCAN: all detailed parameters live in the hdbscan: block below.
+    # HDBSCAN always runs paired with DBSCAN for comparison.
+    - name: hdbscan
+
+evaluation:
+  top_k_confusions: 20
+
+visualization:
+  method: umap                               # umap | tsne
+  umap:
+    n_neighbors: 30
+    min_dist: 0.1
+    metric: cosine
+    random_state: 42
+  tsne:
+    perplexity: 40
+    random_state: 42
+  subsample: 5000
+  dpi: 300
+  export_pdf: true
+
+output_dir: results/eumoth/eumoth_full-dimension 
+seed: 42
+
+# -------------------------------------------------------
+# Dimensionality Reduction
+#
+# One method is applied to ALL clustering algorithms.
+# Choose based on your dataset using the analysis scripts:
+#   Labeled data   -> python cli/reduction_analysis.py --config <config> --mode all
+#   Unlabeled data -> python cli/reduction_analysis_unlabeled.py --config <config>
+#
+# Supported methods:
+#   none      -- no reduction; use full 768D embeddings
+#   pca       -- PCA (linear, fast)
+#   umap      -- UMAP (non-linear, topology-preserving)
+#   pca+umap  -- two-stage: PCA first, then UMAP (preserves both global
+#                variance and local structure; set pca_components for the
+#                intermediate PCA dimension)
+# -------------------------------------------------------
+
+reduction:
+  method: none           # none | pca | umap | pca+umap
+  n_components: 50      # target dimension (ignored when method: none)
+  #### For UMAP JUST Tune the following ###
+  n_neighbors: 15       # UMAP only: local vs. global structure balance
+  min_dist: 0.1         # UMAP only: min distance in embedded space
+  metric: cosine        # UMAP only: distance metric in original space
+  # pca_components: 100 # pca+umap only: intermediate PCA dimension before UMAP
+
+# -------------------------------------------------------
+# DBSCAN configuration
+#
+# These parameters are used exclusively by the DBSCANPipeline.
+# Do NOT duplicate them in clustering.methods above — the
+# dedicated block here always wins.
+# -------------------------------------------------------
+
+dbscan:
+  # NOTE: Feature reduction is now handled by the reduction: section above.
+  # The pca_components here is only used as fallback if no pre-reduced
+  # features are provided (e.g. when running experiment scripts directly).
+
+  # min_samples: used for both the k-distance plot and DBSCAN itself.
+  min_samples: 6
+
+  # eps_range: if omitted, auto-computed from the k-distance knee.
+  # Uncomment and set manually to override:
+  # eps_range: [0.25, 0.30, 0.35, 0.40, 0.45, 0.50, 0.55, 0.60]
+
+  # final_eps: override the auto-selected best eps after seeing the sweep.
+  # Leave commented out to use the sweep result automatically.
+  # final_eps: 0.3471
+
+# -------------------------------------------------------
+# HDBSCAN configuration
+#
+# These parameters are used exclusively by the HDBSCANPipeline.
+# Do NOT duplicate them in clustering.methods above.
+# -------------------------------------------------------
+
+hdbscan:
+  # Sweep range for min_cluster_size.
+  # For EU-Moth (~11 images/class): 3-15 is a sensible range.
+  sweep_range: [3, 5, 7]
+
+  # final_min_cluster_size: override after seeing the sweep.
+  # Leave commented to use the sweep result automatically.
+  # final_min_cluster_size: 3
+
+  # min_samples: HDBSCAN core point conservatism.
+  # None = defaults to min_cluster_size (recommended).
+  # min_samples: 5
+
+# -------------------------------------------------------
+# Annotation Pipeline
+# -------------------------------------------------------
+
+annotation:
+  species_source: dataset
+  taxonomy_source: gbif
+  gbif:
+    taxon_key: 797
+    kingdom: Animalia
+    continent: EUROPE
+    limit: 500
+    cache_dir: .cache/gbif
+
+  uncertainty:
+    # Absolute thresholds on combined uncertainty score [0, 1].
+    # These replace the old percentile approach so that each clustering
+    # method's tier counts reflect its actual uncertainty distribution.
+    #
+    # Combined score is a weighted average of 4 signals (all in [0,1]).
+    # Typical mean for this dataset is ~0.38-0.41.
+    review_threshold: 0.55      # combined >= 0.55 -> "review"
+    human_threshold: 0.70       # combined >= 0.70 -> "human_required"
+    weights:
+      text_margin: 0.35
+      membership_probability: 0.25
+      cluster_agreement: 0.25
+      taxonomic_consistency: 0.15
+
+  include_sanity_check: true
+  n_sanity: 25

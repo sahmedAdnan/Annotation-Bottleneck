@@ -1,0 +1,137 @@
+# -------------------------------------------------------
+# Config: CUB-200-2011 Dataset
+# 200 bird species, CUB annotation format
+# -------------------------------------------------------
+
+dataset:
+  name: cub200
+  format: cub
+  root: D:\Thesis\Test 1st\CUB_200_2011
+  image_extensions: [jpg, jpeg, png]
+  num_classes: 200
+
+model:
+  name: bioclip2
+  pretrained: hf-hub:imageomics/bioclip-2
+  normalize_embeddings: true
+  batch_size: 64
+  num_workers: 8
+
+  # Prompt templates for CUB-200.
+  #
+  # CUB folder names are common names (e.g. "Black_footed_Albatross"),
+  # not binomial scientific names, so {genus} is the first word of the
+  # common name here rather than the true taxonomic genus. This is an
+  # acceptable approximation. If you have the scientific names available,
+  # replace the folder names with them for better alignment.
+  #
+  # Birds belong to class Aves, order varies by species.
+  # Aves is included in every template to anchor the taxonomic context.
+  prompt_templates:
+    - "{name}"
+    - "a photo of {name}"
+    - "a photo of {name}, a bird"
+    - "a bird of the class Aves, {name}"
+    - "a wildlife photograph of {name}, a bird species"
+
+clustering:
+  methods:
+    - name: kmeans
+      n_clusters: 200
+      n_init: 50
+      random_state: 42
+      max_iter: 500
+
+    - name: agglomerative
+      n_clusters: 200
+      linkage: ward
+
+    - name: spectral
+      n_clusters: 200
+      n_init: 10
+      random_state: 42
+      n_neighbors: 60
+
+    - name: gmm
+      n_clusters: 200
+      covariance_type: diag    # 'full' is infeasible for 512-D embeddings
+      random_state: 42
+      max_iter: 300
+
+    # Parameters for dbscan live in the dbscan: block below.
+    - name: dbscan
+
+    # Parameters for hdbscan live in the hdbscan: block below.
+    - name: hdbscan
+
+evaluation:
+  top_k_confusions: 20
+
+visualization:
+  method: umap
+  umap:
+    n_neighbors: 30
+    min_dist: 0.1
+    metric: cosine
+    random_state: 42
+  subsample: 5000
+  dpi: 300
+  export_pdf: true
+
+output_dir: results/cub200/cub200_full-dimension
+seed: 42
+
+# -------------------------------------------------------
+# Dimensionality Reduction
+#
+# One method is applied to ALL clustering algorithms.
+# Choose based on your dataset using the analysis scripts:
+#   Labeled data   -> python cli/reduction_analysis.py --config <config> --mode all
+#   Unlabeled data -> python cli/reduction_analysis_unlabeled.py --config <config>
+#
+# Supported methods:
+#   none      -- no reduction; use full 768D embeddings
+#   pca       -- PCA (linear, fast)
+#   umap      -- UMAP (non-linear, topology-preserving)
+#   pca+umap  -- two-stage: PCA first, then UMAP (preserves both global
+#                variance and local structure; set pca_components for the
+#                intermediate PCA dimension)
+# -------------------------------------------------------
+
+reduction:
+  method: none           # none | pca | umap | pca+umap
+  n_components: 50     # target dimension (ignored when method: none)
+  n_neighbors: 30       # UMAP only: local vs. global structure balance
+  min_dist: 0.1         # UMAP only: min distance in embedded space
+  metric: cosine        # UMAP only: distance metric in original space
+  # pca_components: 100 # pca+umap only: intermediate PCA dimension before UMAP
+
+# -------------------------------------------------------
+# Density-based clustering (DBSCAN + HDBSCAN)
+# -------------------------------------------------------
+
+dbscan:
+  min_samples: 10
+
+hdbscan:
+  sweep_range: [10, 15, 20, 25, 30, 35, 40, 45]
+
+# -------------------------------------------------------
+# Annotation Pipeline
+# -------------------------------------------------------
+
+annotation:
+  species_source: dataset
+  taxonomy_source: names       # CUB uses common names, not scientific — GBIF won't match
+
+  uncertainty:
+    review_threshold: 0.55
+    human_threshold: 0.70
+    weights:
+      text_margin: 0.35
+      membership_probability: 0.25
+      cluster_agreement: 0.25
+      taxonomic_consistency: 0.15
+
+  include_sanity_check: true
+  n_sanity: 25
