@@ -23,10 +23,7 @@ model:
   # Same taxonomic templates as BioCLIP-2 — BioCLIP was trained on the same
   # TreeOfLife data so taxonomic language gives the best alignment.
   prompt_templates:
-    - "{name}"
-    - "{name}, family {family}"
-    - "{name}, family {family}, order {order}"
-    - "a species of genus {genus}, family {family}"
+    - "a photo of {order} {family} {genus} {name}"
 
 clustering:
   methods:

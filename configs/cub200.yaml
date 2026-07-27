@@ -28,11 +28,7 @@ model:
   # Birds belong to class Aves, order varies by species.
   # Aves is included in every template to anchor the taxonomic context.
   prompt_templates:
-    - "{name}"
     - "a photo of {name}"
-    - "a photo of {name}, a bird"
-    - "a bird of the class Aves, {name}"
-    - "a wildlife photograph of {name}, a bird species"
 
 clustering:
   methods:

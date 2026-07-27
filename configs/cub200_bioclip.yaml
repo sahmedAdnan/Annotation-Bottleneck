@@ -19,11 +19,7 @@ model:
   # CUB uses common bird names. BioCLIP was trained on taxonomic text,
   # so Aves context improves alignment even with common names.
   prompt_templates:
-    - "{name}"
-    - "a photo of {name}"
-    - "a photo of {name}, a bird"
-    - "a bird of the class Aves, {name}"
-    - "a wildlife photograph of {name}, a bird species"
+    - "a photo of {order} {family} {genus} {name}"
 
 clustering:
   methods:

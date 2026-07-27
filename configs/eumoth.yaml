@@ -31,11 +31,7 @@ model:
   #
   # Templates with unfillable placeholders are silently skipped.
   prompt_templates:
-    - "{name}"
-    - "a photo of {name}"
-    - "a photo of {name}, a moth"
-    - "{name}, family {family}, order {order}"
-    - "a species of genus {genus}, family {family}"
+    - "a photo of {order} {family} {genus} {name}"
 
 clustering:
   methods:
