@@ -94,4 +94,3 @@ Notes:
 - Annotation requires a BioCLIP model (DINOv2 has no text encoder).
 - All randomness is seeded via each config's `seed`.
 
-See `CLAUDE.md` for architecture and design-decision details.
