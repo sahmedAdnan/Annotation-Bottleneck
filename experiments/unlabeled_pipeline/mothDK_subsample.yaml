@@ -1,0 +1,146 @@
+# -------------------------------------------------------
+# Config: Unlabeled Pipeline run on MothSpeciesDK Subsample
+# -------------------------------------------------------
+# Use this config with run_unlabeled.py when you want to exercise the
+# end-to-end annotation + interactive review pipeline on the MothDK
+# Subsample split. For the labelled extract -> cluster -> evaluate +
+# annotate flow used by the results chapter (Tables 5.1, 5.2, 5.6),
+# use configs/mothDK_subsample.yaml with run_pipeline.py / cli/cluster.py
+# / cli/annotate.py instead.
+#
+# Why a separate file (mirrors the CUB-200 unlabeled config pattern):
+#   - run_unlabeled.py reads clustering.method + clustering.params, not
+#     the methods list / hdbscan.sweep_range block that the labelled
+#     pipeline reads. Without an explicit clustering.method block the
+#     unlabeled pipeline silently falls back to min_cluster_size=3 +
+#     cluster_selection_method=eom, which on this dataset gives 185
+#     clusters / 9.84% noise -- the EOM sweep row -- NOT the leaf
+#     winner chosen in Section 5.3.3 (212 clusters / 14.94% noise at
+#     min_cluster_size=3).
+#   - This config reproduces the leaf-chosen clustering so annotation
+#     accuracy can be compared apples-to-apples against the Hungarian
+#     accuracy reported in Table 5.6.
+# -------------------------------------------------------
+
+# Top-level images_dir for run_unlabeled.py (matches dataset.root below).
+images_dir: D:\Thesis\Test 1st\MothSpeciesDK\MothSpeciesDK
+
+# Output directory for this unlabeled-pipeline run. Kept separate from
+# results/mothDK_subsample/MothDK_subsample_annotation/ so that the
+# earlier eom-default run is preserved for comparison.
+output_dir: results/mothDK_subsample/mothDK_subsample_unlabeled
+
+seed: 42
+
+# -------------------------------------------------------
+# Dataset + subsample selection (reproduces the same 200-class subset
+# used by the labelled pipeline so the cluster/annotation numbers in
+# Section 5.5 align with Tables 5.1, 5.2, 5.6).
+# -------------------------------------------------------
+dataset:
+  name: mothDK_subsample
+  format: imagefolder
+  root: D:\Thesis\Test 1st\MothSpeciesDK\MothSpeciesDK
+  image_extensions: [jpg, jpeg, png]
+  num_classes: 200
+
+  subsample:
+    enabled: true
+    n_classes: 200
+    images_per_class: 10       # set to -1 to keep all images (uncapped)
+    min_images_per_class: 7    # exclude classes with fewer than this
+    random_seed: 42
+
+# -------------------------------------------------------
+# GBIF settings (used only when run without --local / --taxonomy)
+# MothDK folder names are scientific binomials (e.g. "Acasis viretata"),
+# so GBIF taxonomy lookup works well. The recommended mode for
+# Experiment 4 is --taxonomy mothDK_classes_with_family.csv to use the
+# pre-computed GBIF-sourced taxonomy file; that file is ignored when
+# this gbif: block is used directly.
+# -------------------------------------------------------
+gbif:
+  order_key: 797             # Lepidoptera
+  region: europe
+  query_mode: balanced
+  per_family: 40
+  rare_per_family: 10
+  n_candidates: 400
+  include_rare: true
+  images_per_species: 3
+
+# -------------------------------------------------------
+# BioCLIP-2 model + moth-specific prompt templates
+# (mirrors configs/mothDK_subsample.yaml so text matching is identical
+# to the labelled annotation run)
+# -------------------------------------------------------
+model:
+  name: bioclip2
+  pretrained: hf-hub:imageomics/bioclip-2.5-vith14
+  normalize_embeddings: true
+  batch_size: 64
+  num_workers: 8
+
+  prompt_templates:
+    - "{name}"
+    - "a photo of {name}"
+    - "a photo of {name}, a moth"
+    - "{name}, family {family}, order {order}"
+    - "a species of genus {genus}, family {family}"
+
+# -------------------------------------------------------
+# Clustering (HDBSCAN, leaf-chosen settings)
+# min_cluster_size MUST be set explicitly here. run_unlabeled.py reads
+# this block and silently defaults to 3 + eom if it is missing, which
+# would land on the WRONG row of Table 5.6 (eom: 185 clusters / 9.84%
+# noise instead of the chosen leaf row: 212 / 14.94%).
+#
+# Values mirror the labelled sweep winner from
+# results/mothDK_subsample/rerun_umap_20/hdbscan_sweep.csv:
+# at min_cluster_size=3, cluster_selection_method=leaf, the sweep
+# returned 212 clusters, 14.94% noise, weighted_ARI 0.653,
+# ARI 0.768 -- exactly the bold row of Table 5.6.
+# -------------------------------------------------------
+clustering:
+  method: hdbscan
+  params:
+    min_cluster_size: 3
+    cluster_selection_method: leaf
+    # min_samples defaults to min_cluster_size
+
+# -------------------------------------------------------
+# Dimensionality Reduction (matches labelled pipeline for a fair
+# apples-to-apples comparison with results/mothDK_subsample/rerun_umap_20)
+# -------------------------------------------------------
+reduction:
+  method: umap
+  n_components: 20
+  n_neighbors: 15
+  min_dist: 0.1
+  metric: cosine
+
+# -------------------------------------------------------
+# Annotation uncertainty (defaults shared with all datasets)
+# -------------------------------------------------------
+annotation:
+  uncertainty:
+    review_threshold: 0.55
+    human_threshold: 0.70
+    weights:
+      text_margin: 0.35
+      membership_probability: 0.25
+      cluster_agreement: 0.25
+      taxonomic_consistency: 0.15
+
+# -------------------------------------------------------
+# Visualization
+# -------------------------------------------------------
+visualization:
+  method: umap
+  umap:
+    n_neighbors: 20
+    min_dist: 0.1
+    metric: cosine
+    random_state: 42
+  dpi: 300
+  export_pdf: false

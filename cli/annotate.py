@@ -46,6 +46,7 @@ from src.annotation.taxonomy  import build_taxonomy_table
 from src.annotation.annotator import run_annotation
 from src.annotation.review    import export_review_set, merge_expert_review
 from src.annotation.gallery   import generate_gallery
+from src.annotation.interactive_report import generate_interactive_report
 
 
 # -------------------------------------------------------
@@ -335,6 +336,29 @@ def main(config_path: str = None) -> None:
         subheader(f"Gallery: {method_name.upper()}")
         generate_gallery(annotations_df, features_2d, method_output_dir, config,
                          method_name=method_name)
+
+        # Generate the interactive review report (review.html). The same
+        # report run_unlabeled.py emits; written here so the labelled
+        # annotation flow yields the exact same deliverable as the
+        # unlabeled flow. Reference exemplars are 3 images per species
+        # taken from the dataset's own folders (the labelled benchmark
+        # is its own reference collection).
+        subheader(f"Interactive review report: {method_name.upper()}")
+        import collections as _coll
+        _ref = _coll.defaultdict(list)
+        for _p, _lbl in zip(image_paths, labels):
+            _sp = class_names[_lbl]
+            if len(_ref[_sp]) < 3:
+                _ref[_sp].append(_p)
+        reference_map = dict(_ref)
+        review_html_path = os.path.join(method_output_dir, "review.html")
+        try:
+            generate_interactive_report(
+                annotations_df, reference_map, review_html_path,
+                config, candidate_mode="local",
+            )
+        except Exception as _e:
+            print(f"    [warn] review.html not generated: {_e}")
 
     done(output_dir)
 

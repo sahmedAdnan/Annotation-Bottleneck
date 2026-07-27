@@ -20,7 +20,7 @@ dataset:
 
 model:
   name: bioclip2
-  pretrained: hf-hub:imageomics/bioclip-2
+  pretrained: hf-hub:imageomics/bioclip-2.5-vith14
   normalize_embeddings: true
   batch_size: 64
   num_workers: 8

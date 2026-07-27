@@ -38,6 +38,31 @@ GBIF_SPECIES_MATCH  = "https://api.gbif.org/v1/species/match"
 
 LEPIDOPTERA_KEY = 797   # GBIF taxon key for order Lepidoptera
 
+# Human-readable labels for the order keys we commonly use. Extending this
+# table is purely cosmetic (the GBIF API itself accepts any orderKey). It is
+# only used so the "about to query GBIF" banner in run_unlabeled.py can show
+# a recognisable name like "Lepidoptera (moths and butterflies)" instead of
+# the bare integer.
+KNOWN_ORDER_KEYS = {
+    797:  "Lepidoptera (moths and butterflies)",
+    7192: "Aves (birds)",
+    1457: "Coleoptera (beetles)",
+    1303: "Diptera (true flies)",
+    1580: "Hymenoptera (bees, wasps, ants)",
+    359:  "Mammalia (mammals)",
+    715:  "Squamata (lizards and snakes)",
+}
+
+
+def describe_order_keys(order_keys) -> str:
+    """Return a one-line, human-readable description of the configured taxa
+    suitable for the pre-query banner. Unknown keys are echoed as
+    'orderKey=N (unknown)' so a typo is visible at a glance."""
+    keys = [order_keys] if isinstance(order_keys, int) else list(order_keys)
+    parts = [KNOWN_ORDER_KEYS.get(k, f"orderKey={k} (unknown)") for k in keys]
+    return " + ".join(parts)
+
+
 # GBIF continent codes
 CONTINENT_MAP = {
     "europe":        "EUROPE",
@@ -60,8 +85,8 @@ GBIF_RETRY_DELAY = 10.0   # longer backoff on failure
 # -------------------------------------------------------
 
 def query_candidate_species(
-    order_key: Union[int, List[int]] = LEPIDOPTERA_KEY,
-    continent: str = "EUROPE",
+    order_key: Union[int, List[int]],
+    continent: str,
     limit: int = 200,
     include_rare: bool = True,
     rare_fraction: float = 0.1,
@@ -224,8 +249,8 @@ def query_candidate_species(
 
 
 def query_candidates_balanced(
-    order_key: Union[int, List[int]] = LEPIDOPTERA_KEY,
-    continent: str = "EUROPE",
+    order_key: Union[int, List[int]],
+    continent: str,
     per_family: int = 40,
     rare_per_family: int = 10,
     cache_dir: Optional[str] = None,

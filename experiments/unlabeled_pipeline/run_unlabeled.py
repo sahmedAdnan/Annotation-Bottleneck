@@ -59,14 +59,13 @@ from src.annotation.annotator import run_annotation
 from src.annotation.gallery import (plot_uncertainty_histogram,
                                      plot_annotation_map,
                                      plot_confidence_tiers)
-from species_report import generate_species_report
-
 # GBIF imports (only needed in GBIF mode, but import unconditionally for simplicity)
 from gbif_candidates import (query_candidate_species, query_candidates_balanced,
                              download_reference_images,
                               collect_reference_urls,
                               candidates_to_taxonomy, candidates_to_class_names,
-                              expand_candidates_for_gaps, CONTINENT_MAP)
+                              expand_candidates_for_gaps, CONTINENT_MAP,
+                              describe_order_keys, KNOWN_ORDER_KEYS)
 
 
 # -------------------------------------------------------
@@ -129,6 +128,9 @@ def cluster_embeddings(features: np.ndarray,
 
         min_cluster_size = params.get("min_cluster_size", 3)
         min_samples = params.get("min_samples", None)
+        # cluster_selection_method honors the config (was hardcoded "eom").
+        # eom keeps the legacy default for configs that do not set it.
+        cluster_method = params.get("cluster_selection_method", "eom")
 
         # Reduce dimensionality for clustering
         from src.reduction import reduce_features
@@ -140,7 +142,7 @@ def cluster_embeddings(features: np.ndarray,
             min_cluster_size=min_cluster_size,
             min_samples=min_samples,
             metric="euclidean",
-            cluster_selection_method="eom",
+            cluster_selection_method=cluster_method,
         )
         labels = clusterer.fit_predict(features_reduced)
         probabilities = clusterer.probabilities_
@@ -284,160 +286,6 @@ def build_candidates_from_csv(csv_path, images_dir=None):
     return candidate_names, taxonomy_table, reference_map
 
 
-# -------------------------------------------------------
-# Step 8: Enhanced review with reference images
-# -------------------------------------------------------
-
-def export_review_with_references(
-    annotations_df: pd.DataFrame,
-    reference_map: dict,
-    output_dir: str,
-    config: dict,
-    include_sanity_check: bool = True,
-    n_sanity: int = 10,
-) -> str:
-    """
-    Export review sheet with GBIF reference images alongside the uncertain images.
-
-    For each flagged image, the review folder contains:
-      - The original uncertain image (with informative filename)
-      - Reference image(s) for the AI's top prediction
-
-    The review CSV includes a Reference_Images column pointing to the
-    downloaded GBIF reference photos for visual comparison.
-    """
-    review_dir = os.path.join(output_dir, "review_images")
-    ref_review_dir = os.path.join(review_dir, "_references")
-    os.makedirs(review_dir, exist_ok=True)
-    os.makedirs(ref_review_dir, exist_ok=True)
-
-    # Select images needing review
-    needs_review = annotations_df[
-        annotations_df["confidence_tier"].isin(["review", "human_required"])
-    ].copy()
-    needs_review["review_reason"] = needs_review["confidence_tier"].apply(
-        lambda t: "High AI Confusion" if t == "human_required"
-                  else "Moderate Uncertainty"
-    )
-
-    # Add sanity check samples
-    if include_sanity_check:
-        confident = annotations_df[
-            annotations_df["confidence_tier"] == "auto_accept"
-        ]
-        if len(confident) > 0:
-            sanity = confident.sample(
-                n=min(n_sanity, len(confident)), random_state=42
-            ).copy()
-            sanity["review_reason"] = "Sanity Check (High Confidence)"
-            needs_review = pd.concat([needs_review, sanity], ignore_index=True)
-
-    subheader("Exporting review set with reference images")
-    print(f"    Human required : "
-          f"{(needs_review['review_reason'] == 'High AI Confusion').sum()}")
-    print(f"    Review         : "
-          f"{(needs_review['review_reason'] == 'Moderate Uncertainty').sum()}")
-    if include_sanity_check:
-        print(f"    Sanity check   : "
-              f"{(needs_review['review_reason'] == 'Sanity Check (High Confidence)').sum()}")
-
-    review_rows = []
-    copy_count = 0
-
-    for _, row in needs_review.iterrows():
-        original_path = row["file_path"]
-        ai_guess_1 = str(row["ai_annotation"]).replace(" ", "_").replace("/", "-")
-        ai_guess_2 = str(row["ai_second_choice"]).replace(" ", "_").replace("/", "-")
-        uncertainty = row["combined_uncertainty"]
-        original_filename = os.path.basename(original_path)
-
-        # Prefix
-        if "Sanity" in row["review_reason"]:
-            prefix = "SANITY"
-        elif row["confidence_tier"] == "human_required":
-            prefix = "CONFUSED"
-        else:
-            prefix = "REVIEW"
-
-        smart_filename = (f"{prefix}_{uncertainty:.2f}___"
-                          f"{ai_guess_1}_vs_{ai_guess_2}___"
-                          f"{original_filename}")
-
-        # Windows MAX_PATH guard
-        new_path = os.path.join(review_dir, smart_filename)
-        abs_path = os.path.abspath(new_path)
-        if len(abs_path) > 250:
-            ext = os.path.splitext(original_filename)[1]
-            smart_filename = (f"{prefix}_{uncertainty:.2f}___"
-                              f"{ai_guess_1[:30]}___"
-                              f"{original_filename[:40]}{ext}")
-            new_path = os.path.join(review_dir, smart_filename)
-
-        # Copy the uncertain image
-        try:
-            shutil.copy2(original_path, new_path)
-            copy_count += 1
-        except Exception as e:
-            print(f"    [warn] Could not copy {original_path}: {e}")
-            continue
-
-        # Copy reference images for the AI's prediction
-        species_guess = row["ai_annotation"]
-        ref_paths = reference_map.get(species_guess, [])
-        ref_local_names = []
-
-        for j, ref_src in enumerate(ref_paths[:2]):
-            if os.path.exists(ref_src):
-                ref_name = f"REF_{ai_guess_1}_{j+1}{os.path.splitext(ref_src)[1]}"
-                ref_dest = os.path.join(ref_review_dir, ref_name)
-                if not os.path.exists(ref_dest):
-                    try:
-                        shutil.copy2(ref_src, ref_dest)
-                    except Exception:
-                        pass
-                ref_local_names.append(ref_name)
-
-        # Also get reference for second choice
-        species_guess_2 = row["ai_second_choice"]
-        ref_paths_2 = reference_map.get(species_guess_2, [])
-        ref_2_names = []
-
-        for j, ref_src in enumerate(ref_paths_2[:1]):  # 1 ref for second choice
-            if os.path.exists(ref_src):
-                ref_name = f"REF_{ai_guess_2}_{j+1}{os.path.splitext(ref_src)[1]}"
-                ref_dest = os.path.join(ref_review_dir, ref_name)
-                if not os.path.exists(ref_dest):
-                    try:
-                        shutil.copy2(ref_src, ref_dest)
-                    except Exception:
-                        pass
-                ref_2_names.append(ref_name)
-
-        review_rows.append({
-            "Review_Filename":        smart_filename,
-            "Review_Reason":          row["review_reason"],
-            "AI_Guess_1":             row["ai_annotation"],
-            "AI_Guess_2":             row["ai_second_choice"],
-            "Uncertainty_Score":      round(uncertainty, 4),
-            "Reference_Images_Guess1": "; ".join(ref_local_names) if ref_local_names else "N/A",
-            "Reference_Images_Guess2": "; ".join(ref_2_names) if ref_2_names else "N/A",
-            "Expert_Corrected_Label": "",   # Expert fills this
-            "Expert_Notes":           "",   # Expert fills this
-            "Reference_Suggestion":   "",   # Expert can note what the reference shows
-            "Original_Filename":      original_filename,
-        })
-
-    # Save review template
-    review_df = pd.DataFrame(review_rows)
-    csv_path = os.path.join(output_dir, "review_template.csv")
-    review_df.to_csv(csv_path, index=False)
-
-    print(f"    Copied {copy_count} images to {review_dir}")
-    print(f"    Reference images in {ref_review_dir}")
-    print(f"    Review template: {csv_path}")
-
-    return csv_path
-
 
 # -------------------------------------------------------
 # Main pipeline
@@ -481,15 +329,6 @@ def main():
                              "Images are always visible. Use --no-embed for smaller file.")
     parser.add_argument("--no-embed", action="store_true", default=False,
                         help="Disable image embedding (file:// paths, may not render in browser).")
-    parser.add_argument("--merge", default=None, nargs="+", metavar="CSV_PATH",
-                        help="Merge expert review CSV(s) into annotations.\n"
-                             "Accepts one or more CSVs (auto-detected format):\n"
-                             "  - Per-image CSV  (from HTML 'Download Per-Image CSV')\n"
-                             "  - Cluster CSV    (from HTML 'Download Cluster Review CSV')\n"
-                             "  - Review template CSV (from export_review_set)\n"
-                             "Multiple CSVs are merged sequentially.\n"
-                             "Produces: annotations_final.csv, sorted_species/,\n"
-                             "          species_list.csv, summary.txt, report.")
     parser.add_argument("--apply-decisions", default=None, metavar="CSV_PATH",
                         dest="apply_decisions",
                         help="Apply the single decisions.csv produced by the\n"
@@ -503,7 +342,7 @@ def main():
 
     # ---- Apply-decisions mode: single decisions file from review.html ----
     if args.apply_decisions:
-        from interactive_report import apply_decisions
+        from src.annotation.interactive_report import apply_decisions
         from src.annotation.review import export_sorted_species, generate_summary
 
         base_dir = config["output_dir"]
@@ -538,102 +377,6 @@ def main():
         print(f"  sorted_species/        -- clean imagefolder dataset")
         print(f"  species_list.csv, summary.txt")
         print(f"{'='*60}")
-        sys.exit(0)
-
-    # ---- Merge mode: apply expert CSV and exit ----
-    if args.merge:
-        from src.annotation.review import (merge_expert_review,
-                                           export_sorted_species,
-                                           generate_summary)
-
-        # Find the right output directory
-        base_dir = config["output_dir"]
-        candidates_dirs = [
-            base_dir.rstrip("/\\") + "_local",
-            base_dir,
-            base_dir.rstrip("/\\") + "_csv",
-        ]
-        output_dir = None
-        for d in candidates_dirs:
-            if os.path.exists(os.path.join(d, "annotations.csv")):
-                output_dir = d
-                break
-        if output_dir is None:
-            print(f"[error] No annotations.csv found in any of:")
-            for d in candidates_dirs:
-                print(f"        {d}")
-            print(f"        Run the pipeline first before merging.")
-            sys.exit(1)
-
-        ann_path = os.path.join(output_dir, "annotations.csv")
-        print(f"[merge] Using annotations from {ann_path}")
-        annotations_df = pd.read_csv(ann_path)
-
-        # Step 1: Merge expert corrections (one or more CSVs)
-        final_df = annotations_df
-        for csv_path in args.merge:
-            if not os.path.exists(csv_path):
-                print(f"[error] File not found: {csv_path}")
-                sys.exit(1)
-            final_df = merge_expert_review(final_df, csv_path, output_dir)
-
-        # Step 2: Organize images into species folders
-        print(f"\n{'='*60}")
-        print(f"  Organizing images by species...")
-        print(f"{'='*60}")
-        export_sorted_species(final_df, output_dir)
-
-        # Step 3: Generate summary statistics
-        print(f"\n{'='*60}")
-        print(f"  Generating summary statistics...")
-        print(f"{'='*60}")
-        generate_summary(final_df, output_dir, config)
-
-        # Step 4: Regenerate HTML report with corrections applied
-        print(f"\n{'='*60}")
-        print(f"  Regenerating species report with corrections...")
-        print(f"{'='*60}")
-
-        # Try to load reference map from cached data
-        reference_map = {}
-        ref_dir = os.path.join(output_dir, "review_images")
-        if os.path.isdir(ref_dir):
-            for sp_folder in os.listdir(ref_dir):
-                sp_path = os.path.join(ref_dir, sp_folder)
-                if os.path.isdir(sp_path):
-                    name = sp_folder.replace("_", " ")
-                    imgs = [os.path.join(sp_path, f)
-                            for f in sorted(os.listdir(sp_path))
-                            if f.lower().endswith((".jpg", ".jpeg", ".png"))]
-                    if imgs:
-                        reference_map[name] = imgs
-
-        # Determine candidate mode from output_dir suffix
-        if output_dir.endswith("_local"):
-            cmode = "local"
-        elif output_dir.endswith("_csv"):
-            cmode = "csv"
-        else:
-            cmode = "gbif"
-
-        report_path = os.path.join(output_dir, "species_report_final.html")
-        generate_species_report(
-            final_df, reference_map, report_path, config,
-            max_images_per_cluster=20,
-            embed_images=not args.no_embed,
-            candidate_mode=cmode,
-        )
-
-        print(f"\n{'='*60}")
-        print(f"  POST-MERGE COMPLETE")
-        print(f"{'='*60}")
-        print(f"  annotations_final.csv    — corrected annotations")
-        print(f"  sorted_species/          — images organized by species")
-        print(f"  species_list.csv         — species list with counts")
-        print(f"  summary.txt              — statistics for publication")
-        print(f"  species_report_final.html — updated report")
-        print(f"{'='*60}")
-
         sys.exit(0)
 
     # Determine candidate mode
@@ -766,17 +509,64 @@ def main():
 
     else:
         # ---- GBIF MODE: query GBIF API ----
-        gbif_cfg     = config.get("gbif", {})
-        region       = gbif_cfg.get("region", "europe")
-        n_candidates = gbif_cfg.get("n_candidates", 200)
-        continent    = CONTINENT_MAP.get(region, "EUROPE")
+        # GBIF mode REQUIRES an explicit gbif: block with at least order_key
+        # and region. Silently defaulting either of these would cause the
+        # pipeline to query the wrong taxon or the wrong continent and produce
+        # plausible-looking but incorrect candidate lists (e.g. moth species
+        # returned for a bird dataset). Fail fast with a clear message instead.
+        gbif_cfg = config.get("gbif")
+        missing = []
+        if not isinstance(gbif_cfg, dict):
+            missing = ["order_key", "region"]
+        else:
+            if "order_key" not in gbif_cfg:
+                missing.append("order_key")
+            if "region" not in gbif_cfg:
+                missing.append("region")
+        if missing:
+            known = ", ".join(f"{k}={v.split(' ')[0]}"
+                              for k, v in KNOWN_ORDER_KEYS.items())
+            print("\n  ERROR: GBIF mode requires an explicit 'gbif:' block in "
+                  f"the config.\n         Missing: {', '.join(missing)}")
+            print(f"         Config file: {args.config}")
+            print("\n  Add a block like this to the config and re-run, or use\n"
+                  "  --local (folder names as candidates) or\n"
+                  "  --taxonomy <csv> (CSV candidate list):\n")
+            print("    gbif:")
+            print("      order_key: 797        # 797=Lepidoptera, 7192=Aves,")
+            print(f"                            # known keys: {known}")
+            print("      region: europe        # europe | asia | north_america |")
+            print("                            # south_america | africa | oceania")
+            print("      n_candidates: 400     # optional, default 200")
+            print("      query_mode: balanced  # optional, balanced | top")
+            sys.exit(1)
 
-        print(f"    Region: {region} ({continent})")
-
-        order_key = gbif_cfg.get("order_key", 797)  # int or list of ints
-        query_mode = gbif_cfg.get("query_mode", "balanced")
-        per_family = gbif_cfg.get("per_family", 40)
+        region          = gbif_cfg["region"]
+        order_key       = gbif_cfg["order_key"]       # int or list of ints
+        n_candidates    = gbif_cfg.get("n_candidates", 200)
+        query_mode      = gbif_cfg.get("query_mode", "balanced")
+        per_family      = gbif_cfg.get("per_family", 40)
         rare_per_family = gbif_cfg.get("rare_per_family", 10)
+
+        if region not in CONTINENT_MAP:
+            print(f"\n  ERROR: Unknown region '{region}'. "
+                  f"Valid: {', '.join(CONTINENT_MAP)}")
+            sys.exit(1)
+        continent = CONTINENT_MAP[region]
+
+        # Visible "about to query GBIF" banner so a wrong order_key is caught
+        # within the first second, before any slow API call. If the taxon name
+        # does not match the dataset, the operator can Ctrl-C immediately.
+        print("\n  ----------------------------------------------------------")
+        print("    GBIF QUERY PLAN")
+        print("  ----------------------------------------------------------")
+        print(f"    Taxon : {describe_order_keys(order_key)}")
+        print(f"    Region: {region} ({continent})")
+        print(f"    Mode  : {query_mode}")
+        print(f"    Config: {args.config}")
+        print("  ----------------------------------------------------------")
+        print("    If this does not match your dataset, press Ctrl+C now.")
+        print("  ----------------------------------------------------------\n")
 
         if query_mode == "balanced":
             candidates = query_candidates_balanced(
@@ -1114,33 +904,15 @@ def main():
         print(f"    [warn] Could not generate UMAP map: {e}")
 
     # =========================================================
-    # STEP 8: Export review sheet with reference images
+    # STEP 8: Generate interactive review report
     # =========================================================
-    subheader("Step 8 - Exporting review sheet with reference images")
+    subheader("Step 8 - Generating interactive review report")
 
-    review_path = export_review_with_references(
-        annotations_df, reference_map, output_dir, config,
-        include_sanity_check=True, n_sanity=10,
-    )
-
-    # =========================================================
-    # STEP 9: Generate HTML species report
-    # =========================================================
-    subheader("Step 9 - Generating interactive species report")
-
-    report_path = os.path.join(output_dir, "species_report.html")
-    embed = not args.no_embed
-    generate_species_report(
-        annotations_df, reference_map, report_path, config,
-        max_images_per_cluster=20, embed_images=embed,
-        all_candidate_names=candidate_names,
-        candidate_mode=candidate_mode,
-    )
-
-    # Interactive self-contained report for hand-off to an ecologist.
-    # One file, zero setup; produces a single decisions.csv that is applied
-    # back with: run_unlabeled.py --config ... --apply-decisions decisions.csv
-    from interactive_report import generate_interactive_report
+    # One self-contained review.html for the ecologist (zero setup, offline
+    # for local/csv runs). Finalize in the browser produces decisions.csv,
+    # which is applied back with:
+    #   run_unlabeled.py --config ... --apply-decisions decisions.csv
+    from src.annotation.interactive_report import generate_interactive_report
     generate_interactive_report(
         annotations_df, reference_map,
         os.path.join(output_dir, "review.html"),
@@ -1199,13 +971,12 @@ def main():
           f"({tier_counts.get('auto_accept', 0)/total*100:.1f}%)")
     print(f"  Need review     : {tier_counts.get('review', 0) + tier_counts.get('human_required', 0)} "
           f"({(tier_counts.get('review', 0) + tier_counts.get('human_required', 0))/total*100:.1f}%)")
-    print(f"\n  Species report  : {report_path}")
-    print(f"  Review CSV      : {review_path}")
+    print(f"\n  Review report   : {os.path.join(output_dir, 'review.html')}")
     if candidate_mode == "gbif":
-        print(f"\n  Next: Open species_report.html in a browser.")
+        print(f"\n  Next: Open review.html in a browser.")
         print(f"  (Requires internet - reference images load from GBIF on-the-fly)")
     else:
-        print(f"\n  Next: Open species_report.html in a browser to review.")
+        print(f"\n  Next: Open review.html in a browser to review.")
     print(f"  Use buttons below each image, then export CSV.")
 
     done(output_dir)

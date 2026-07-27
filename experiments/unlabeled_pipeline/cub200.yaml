@@ -1,0 +1,118 @@
+# -------------------------------------------------------
+# Config: Unlabeled Pipeline run on CUB-200-2011
+# -------------------------------------------------------
+# Use this config with run_unlabeled.py when you want to exercise the
+# end-to-end interactive annotation + review pipeline on CUB-200. For the
+# labelled extract -> cluster -> evaluate + annotate flow used by the
+# results chapter, use configs/cub200.yaml with run_pipeline.py /
+# cli/cluster.py / cli/annotate.py instead.
+#
+# Why a separate file:
+#   - run_unlabeled.py expects images_dir to point at the species directory
+#     (CUB stores species one level below the parent root, so we point at
+#     <root>/images here rather than the parent).
+#   - run_unlabeled.py reads clustering.method + clustering.params (not the
+#     methods list / sweep block that the labelled pipeline reads), so
+#     min_cluster_size must be set here explicitly. The value below mirrors
+#     what the labelled HDBSCAN sweep selected on this dataset and
+#     reduction setting (pca+umap, n_components=5).
+# -------------------------------------------------------
+
+# CUB stores its 200 species folders one level below the dataset parent.
+# Point the unlabeled pipeline directly at the species directory.
+images_dir: D:\Thesis\Test 1st\CUB_200_2011\images
+
+# Output directory for this unlabeled-pipeline run. Kept separate from
+# results/cub200/ subdirs produced by the labelled pipeline.
+output_dir: results/cub200/cub200_unlabeled_Annotation_common_name
+
+seed: 42
+
+# -------------------------------------------------------
+# GBIF settings (only used when run without --local / --taxonomy)
+# CUB folder names are English common names. GBIF's species/match endpoint
+# does not reliably resolve common names, so the recommended modes are
+# --local (folder names as candidates) or --taxonomy <csv> (pre-built
+# scientific binomials). The gbif: block below is here for completeness
+# and for the optional Aves discovery mode; it is ignored in local/csv mode.
+# -------------------------------------------------------
+gbif:
+  order_key: 7192            # Aves (birds)
+  region: north_america      # CUB-200 is heavily North-American
+  query_mode: balanced
+  per_family: 40
+  rare_per_family: 10
+  n_candidates: 400
+  include_rare: true
+  images_per_species: 3
+
+# -------------------------------------------------------
+# BioCLIP-2 model + bird-specific prompt templates
+# (mirrors configs/cub200.yaml so text matching is identical to the
+# labelled annotation run)
+# -------------------------------------------------------
+model:
+  name: bioclip2
+  pretrained: hf-hub:imageomics/bioclip-2
+  normalize_embeddings: true
+  batch_size: 64
+  num_workers: 8
+
+  prompt_templates:
+    - "{name}"
+
+# -------------------------------------------------------
+# Clustering (HDBSCAN)
+# min_cluster_size MUST be set explicitly here. run_unlabeled.py reads
+# this block and silently defaults to 3 if it is missing, which over-
+# segments the dataset (~531 clusters instead of ~198 on CUB-200).
+#
+# The value 20 mirrors the winner of the labelled HDBSCAN sweep on this
+# dataset + reduction setting (see results/cub200/cub200_pca100+umap_5/
+# hdbscan_sweep.csv : weighted_ari maximised at min_cluster_size=20).
+# Adjust if you change the reduction below.
+# -------------------------------------------------------
+clustering:
+  method: hdbscan
+  params:
+    min_cluster_size: 20
+    cluster_selection_method: eom
+    # min_samples defaults to min_cluster_size
+
+# -------------------------------------------------------
+# Dimensionality Reduction (must match labelled pipeline for a fair
+# apples-to-apples comparison with results/cub200/cub200_pca100+umap_5)
+# -------------------------------------------------------
+reduction:
+  method: pca+umap
+  n_components: 5
+  pca_components: 100        # intermediate PCA dim before UMAP
+  n_neighbors: 30
+  min_dist: 0.1
+  metric: cosine
+
+# -------------------------------------------------------
+# Annotation uncertainty (defaults shared with all datasets)
+# -------------------------------------------------------
+annotation:
+  uncertainty:
+    review_threshold: 0.55
+    human_threshold: 0.70
+    weights:
+      text_margin: 0.35
+      membership_probability: 0.25
+      cluster_agreement: 0.25
+      taxonomic_consistency: 0.15
+
+# -------------------------------------------------------
+# Visualization
+# -------------------------------------------------------
+visualization:
+  method: umap
+  umap:
+    n_neighbors: 30
+    min_dist: 0.1
+    metric: cosine
+    random_state: 42
+  dpi: 300
+  export_pdf: false

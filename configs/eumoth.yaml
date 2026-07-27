@@ -12,7 +12,7 @@ dataset:
 
 model:
   name: bioclip2                             # bioclip2 | bioclip | clip | dinov2
-  pretrained: hf-hub:imageomics/bioclip-2
+  pretrained: hf-hub:imageomics/bioclip-2.5-vith14
   normalize_embeddings: true
   batch_size: 64
   num_workers: 8
@@ -91,7 +91,7 @@ visualization:
   dpi: 300
   export_pdf: true
 
-output_dir: results/eumoth/eumoth_full-dimension 
+output_dir: results/eumoth/eumoth_umap_5
 seed: 42
 
 # -------------------------------------------------------
@@ -112,8 +112,8 @@ seed: 42
 # -------------------------------------------------------
 
 reduction:
-  method: none           # none | pca | umap | pca+umap
-  n_components: 50      # target dimension (ignored when method: none)
+  method: umap           # none | pca | umap | pca+umap
+  n_components: 5      # target dimension (ignored when method: none)
   #### For UMAP JUST Tune the following ###
   n_neighbors: 15       # UMAP only: local vs. global structure balance
   min_dist: 0.1         # UMAP only: min distance in embedded space

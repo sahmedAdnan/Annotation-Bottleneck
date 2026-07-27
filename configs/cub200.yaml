@@ -78,7 +78,7 @@ visualization:
   dpi: 300
   export_pdf: true
 
-output_dir: results/cub200/cub200_pca100_umap_5
+output_dir: results/cub200/cub200_pca100+umap_5
 seed: 42
 
 # -------------------------------------------------------
